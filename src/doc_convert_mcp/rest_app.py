@@ -32,10 +32,17 @@ class UrlRequest(BaseModel):
 
 
 def create_app(rate_limit: str | None = None) -> FastAPI:
+    # MCP sub-app first: its lifespan must be handed to the parent FastAPI app,
+    # otherwise FastMCP's session task group never initializes and every
+    # request 500s ("Task group is not initialized"). path="/" serves the MCP
+    # endpoint at the mount root, i.e. POST /mcp (the http_app default path
+    # would double it to /mcp/mcp).
+    mcp_asgi = mcp.http_app(path="/", transport="streamable-http", stateless_http=True)
     app = FastAPI(
         title="doc-convert-mcp",
         version=__version__,
         description="Document conversion API: PDF to Markdown, OCR, spreadsheets, URL to text.",
+        lifespan=mcp_asgi.lifespan,
     )
 
     # x402 metering (env-gated, OFF by default) runs outermost.
@@ -94,7 +101,7 @@ def create_app(rate_limit: str | None = None) -> FastAPI:
         return {"text": _url_to_clean_text(body.url)}
 
     # MCP over streamable HTTP, mounted at /mcp (stateless: safe to mount).
-    app.mount("/mcp", mcp.http_app(transport="streamable-http", stateless_http=True))
+    app.mount("/mcp", mcp_asgi)
 
     return app
 
