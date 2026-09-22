@@ -1,0 +1,4 @@
+# Dev-only dependencies (tests, lint, audit) — exact pins.
+pytest==9.1.1
+ruff==0.16.8
+pip-audit==2.10.1
