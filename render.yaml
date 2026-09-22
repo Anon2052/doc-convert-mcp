@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: doc-convert-mcp
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    plan: starter
+    autoDeploy: true
+    envVars:
+      - key: X402_ENABLED
+        value: "false"
+      - key: RATE_LIMIT
+        value: 60/minute
