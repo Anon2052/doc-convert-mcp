@@ -34,13 +34,14 @@ CREATE TABLE IF NOT EXISTS subscribers (
   updated_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_subscribers_customer ON subscribers(customer_id);
--- Fair-use counter for Pro subscribers: calls per subscriber key, per UTC
--- calendar month. Row-per-month means a new month starts a fresh counter
--- automatically (no rollover job needed).
+-- Fair-use counter for Pro subscribers: credits spent per subscriber key,
+-- per UTC calendar month. Row-per-month means a new month starts a fresh
+-- counter automatically (no rollover job needed). Credits are REAL and
+-- fractional: 1 credit = $0.01 of x402 list price.
 CREATE TABLE IF NOT EXISTS subscriber_usage (
   key_hash TEXT NOT NULL,
   month    TEXT NOT NULL,
-  calls    INTEGER NOT NULL DEFAULT 0,
+  credits  REAL NOT NULL DEFAULT 0,
   PRIMARY KEY (key_hash, month)
 );
 """
@@ -88,6 +89,14 @@ def _connect() -> sqlite3.Connection:
     os.makedirs(parent, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.executescript(_SCHEMA)
+    # Legacy DBs from the call-based cap (pre-credit builds) have a `calls`
+    # column but no `credits` column — add it in place so old files keep
+    # working. Payments never went live, so there is no production data to
+    # migrate; the old `calls` values are simply left unused.
+    try:
+        conn.execute("ALTER TABLE subscriber_usage ADD COLUMN credits REAL NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # column already present
     return conn
 
 
@@ -149,32 +158,33 @@ def subscriber_key_valid(raw_key: str | None) -> bool:
     return row is not None and row[0] == "active"
 
 
-# --- Fair-use cap for Pro subscribers ---------------------------------------
-#: Default monthly call cap per subscriber key. Business knob: at ~$0.02 avg
-#: per-call price, $9/mo breaks even at ~450 calls; 1000 gives headroom.
-#: Scott's call — override with SUBSCRIBER_MONTHLY_CALL_LIMIT.
-DEFAULT_SUBSCRIBER_MONTHLY_CALL_LIMIT = 1000
+# --- Fair-use credit cap for Pro subscribers --------------------------------
+#: Default monthly credit cap per subscriber key. 1 credit = $0.01 of x402
+#: list price, so 1000 credits = $10 of API calls on the $9/mo Pro plan —
+#: flat calls let heavy users of expensive tools exploit the plan, credits
+#: don't. Scott's call — override with SUBSCRIBER_MONTHLY_CREDIT_LIMIT.
+DEFAULT_SUBSCRIBER_MONTHLY_CREDIT_LIMIT = 1000.0
 
 
-def subscriber_monthly_call_limit() -> int:
-    """Monthly call cap per subscriber key; invalid/non-positive -> default."""
-    raw = os.environ.get("SUBSCRIBER_MONTHLY_CALL_LIMIT", "").strip()
+def subscriber_monthly_credit_limit() -> float:
+    """Monthly credit cap per subscriber key; invalid/non-positive -> default."""
+    raw = os.environ.get("SUBSCRIBER_MONTHLY_CREDIT_LIMIT", "").strip()
     try:
-        value = int(raw) if raw else DEFAULT_SUBSCRIBER_MONTHLY_CALL_LIMIT
+        value = float(raw) if raw else DEFAULT_SUBSCRIBER_MONTHLY_CREDIT_LIMIT
     except ValueError:
         log.warning(
-            "Invalid SUBSCRIBER_MONTHLY_CALL_LIMIT=%r; using default %d.",
+            "Invalid SUBSCRIBER_MONTHLY_CREDIT_LIMIT=%r; using default %s.",
             raw,
-            DEFAULT_SUBSCRIBER_MONTHLY_CALL_LIMIT,
+            DEFAULT_SUBSCRIBER_MONTHLY_CREDIT_LIMIT,
         )
-        return DEFAULT_SUBSCRIBER_MONTHLY_CALL_LIMIT
+        return DEFAULT_SUBSCRIBER_MONTHLY_CREDIT_LIMIT
     if value <= 0:
         log.warning(
-            "Non-positive SUBSCRIBER_MONTHLY_CALL_LIMIT=%r; using default %d.",
+            "Non-positive SUBSCRIBER_MONTHLY_CREDIT_LIMIT=%r; using default %s.",
             raw,
-            DEFAULT_SUBSCRIBER_MONTHLY_CALL_LIMIT,
+            DEFAULT_SUBSCRIBER_MONTHLY_CREDIT_LIMIT,
         )
-        return DEFAULT_SUBSCRIBER_MONTHLY_CALL_LIMIT
+        return DEFAULT_SUBSCRIBER_MONTHLY_CREDIT_LIMIT
     return value
 
 
@@ -193,31 +203,53 @@ def month_reset_iso(month: str) -> str:
     return nxt.isoformat()
 
 
-def record_subscriber_call(raw_key: str) -> dict:
-    """Increment this subscriber key's call counter for the current UTC month.
+def record_subscriber_credits(raw_key: str, credits: float) -> dict:
+    """Deduct ``credits`` from this subscriber key's monthly credit balance.
 
-    Returns ``{"month", "usage", "limit", "resets_at"}`` — the counter row is
-    created on first use of the month, so the cap auto-resets at the
-    calendar-month boundary with no rollover job.
+    Returns ``{"month", "credits_used", "credit_limit", "resets_at"}`` — the
+    counter row is created on first use of the month, so the cap auto-resets
+    at the calendar-month boundary with no rollover job.
     """
     key_hash = hash_subscriber_key(raw_key.strip())
     month = current_month_utc()
-    limit = subscriber_monthly_call_limit()
+    limit = subscriber_monthly_credit_limit()
     with _db_lock, _connect() as conn:
         conn.execute(
-            "INSERT INTO subscriber_usage (key_hash, month, calls) VALUES (?, ?, 1)"
-            " ON CONFLICT (key_hash, month) DO UPDATE SET calls = calls + 1",
-            (key_hash, month),
+            "INSERT INTO subscriber_usage (key_hash, month, credits) VALUES (?, ?, ?)"
+            " ON CONFLICT (key_hash, month) DO UPDATE SET"
+            " credits = credits + excluded.credits",
+            (key_hash, month, credits),
         )
         (usage,) = conn.execute(
-            "SELECT calls FROM subscriber_usage WHERE key_hash = ? AND month = ?",
+            "SELECT credits FROM subscriber_usage WHERE key_hash = ? AND month = ?",
             (key_hash, month),
         ).fetchone()
     return {
         "month": month,
-        "usage": usage,
-        "limit": limit,
+        "credits_used": usage,
+        "credit_limit": limit,
         "resets_at": month_reset_iso(month),
+    }
+
+
+def get_subscriber_credit_usage(raw_key: str) -> dict:
+    """Read-only credit usage for a subscriber key (no deduction).
+
+    Backs ``GET /billing/usage``: returns ``{"credits_used", "credit_limit",
+    "resets_at", "period"}`` for the current UTC month.
+    """
+    key_hash = hash_subscriber_key(raw_key.strip())
+    month = current_month_utc()
+    with _db_lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT credits FROM subscriber_usage WHERE key_hash = ? AND month = ?",
+            (key_hash, month),
+        ).fetchone()
+    return {
+        "credits_used": row[0] if row else 0.0,
+        "credit_limit": subscriber_monthly_credit_limit(),
+        "resets_at": month_reset_iso(month),
+        "period": month,
     }
 
 

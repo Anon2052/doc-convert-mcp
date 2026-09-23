@@ -37,7 +37,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .billing import (
-    record_subscriber_call,
+    record_subscriber_credits,
     stripe_effective_enabled,
     subscriber_key_valid,
 )
@@ -151,6 +151,19 @@ def tool_price_usdc(tool_name: str | None) -> Decimal:
 
 def usdc_to_atomic_units(price: Decimal) -> int:
     return int((price * (10**USDC_DECIMALS)).to_integral_value(rounding="ROUND_DOWN"))
+
+
+# --- Subscriber credits ------------------------------------------------------
+#: 1 credit = $0.01 of x402 list price. The credit cost of a call derives
+#: from the SAME per-tool price map the x402 middleware uses (see
+#: ``tool_price_usdc`` / ``X402PaymentMiddleware._resolve_price``) — this is
+#: the only place the conversion lives, never a duplicated price table.
+def credits_for_price(price_usdc: Decimal) -> float:
+    """Credit cost of one call at the given x402 list price.
+
+    $0.03 -> 3.0, $0.02 -> 2.0, $0.01 -> 1.0, $0.015 (default) -> 1.5.
+    """
+    return round(float(price_usdc) / 0.01, 1)
 
 
 # --- CDP JWT minting ----------------------------------------------------------
@@ -327,27 +340,27 @@ def payment_required_response(
 
 
 def subscriber_monthly_cap_exceeded_response(usage: dict) -> JSONResponse:
-    """HTTP 429 for a subscriber over the monthly fair-use cap.
+    """HTTP 429 for a subscriber over the monthly credit fair-use cap.
 
-    The body is user-actionable: the cap, current usage, the period, the
-    reset date (first of next month, UTC), and the per-call x402 fallback —
-    never silently served.
+    The body is user-actionable: the credit cap, current credit usage, the
+    period, the reset date (first of next month, UTC), and the per-call x402
+    fallback — never silently served.
     """
-    limit = usage["limit"]
+    limit = usage["credit_limit"]
     return JSONResponse(
         status_code=429,
         content={
             "error": "subscriber_monthly_cap_exceeded",
             "message": (
-                f"Monthly fair-use cap reached: {usage['usage']}/{limit} calls "
-                f"in {usage['month']} (UTC). Your Pro subscription renews its "
-                f"allowance on {usage['resets_at']}. Until then, per-call x402 "
-                "payment still works: resend this request WITHOUT the "
-                "X-Subscriber-Key header and include a valid X-Payment "
+                f"Monthly fair-use cap reached: {usage['credits_used']}/{limit} "
+                f"credits in {usage['month']} (UTC). Your Pro subscription "
+                f"renews its allowance on {usage['resets_at']}. Until then, "
+                "per-call x402 payment still works: resend this request WITHOUT "
+                "the X-Subscriber-Key header and include a valid X-Payment "
                 "authorization."
             ),
-            "limit": limit,
-            "usage": usage["usage"],
+            "credits_used": usage["credits_used"],
+            "credit_limit": limit,
             "period": usage["month"],
             "resets_at": usage["resets_at"],
         },
@@ -449,15 +462,22 @@ class X402PaymentMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # Stripe subscriber bypass: a valid subscriber key skips per-call x402,
-        # subject to the Pro monthly fair-use cap.
+        # subject to the Pro monthly fair-use CREDIT cap. The credit cost of
+        # this call derives from the same price map the x402 path below uses,
+        # so expensive tools cost more credits than cheap ones.
         sub_key = request.headers.get("x-subscriber-key")
         if sub_key and stripe_effective_enabled() and subscriber_key_valid(sub_key):
-            usage = record_subscriber_call(sub_key)
-            if usage["usage"] > usage["limit"]:
+            price, _, exempt = await self._resolve_price(request)
+            if exempt:
+                # Free discovery/info calls cost nothing and are never capped.
+                return await call_next(request)
+            credit_cost = credits_for_price(price)
+            usage = record_subscriber_credits(sub_key, credit_cost)
+            if usage["credits_used"] > usage["credit_limit"]:
                 log.info(
-                    "Subscriber fair-use cap exceeded: %d/%d calls in %s",
-                    usage["usage"],
-                    usage["limit"],
+                    "Subscriber fair-use credit cap exceeded: %s/%s credits in %s",
+                    usage["credits_used"],
+                    usage["credit_limit"],
                     usage["month"],
                 )
                 return subscriber_monthly_cap_exceeded_response(usage)

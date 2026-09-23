@@ -21,9 +21,11 @@ from starlette.routing import Route
 from . import __version__
 from .billing import (
     create_checkout_session,
+    get_subscriber_credit_usage,
     handle_stripe_webhook,
     issue_key_for_session,
     stripe_effective_enabled,
+    subscriber_key_valid,
 )
 from .converters import ConversionError, ocr_image, parse_spreadsheet, pdf_to_markdown
 from .converters import url_to_clean_text as _url_to_clean_text
@@ -198,6 +200,20 @@ def create_app(rate_limit: str | None = None) -> FastAPI:
             log.exception("Subscriber key issuance failed")
             return JSONResponse(status_code=503, content={"error": "billing_unavailable"})
         return {"subscriber_key": key}
+
+    @app.get("/billing/usage")
+    async def billing_usage(request: Request):  # noqa: ANN001, ANN202
+        """Current month's fair-use credit usage for a Pro subscriber.
+
+        Authed by X-Subscriber-Key. FREE by design: /billing/* is exempt from
+        the x402 middleware, and the middleware's subscriber-cap gate only runs
+        on paid paths, so this endpoint is never 402'd and never 429-gated by
+        the cap itself — reading usage never consumes credits.
+        """
+        raw_key = (request.headers.get("x-subscriber-key") or "").strip()
+        if not subscriber_key_valid(raw_key):
+            return JSONResponse(status_code=401, content={"error": "invalid_subscriber_key"})
+        return get_subscriber_credit_usage(raw_key)
 
     @app.get("/billing/status")
     async def billing_status():

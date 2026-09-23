@@ -155,15 +155,18 @@ Endpoints: `POST /billing/checkout` → `{"checkout_url": ...}`;
 `GET /billing/status` → `{"stripe_enabled": bool, "x402_enabled": bool}`.
 
 **Fair-use cap (Pro).** Subscriber-key auth is capped at
-`SUBSCRIBER_MONTHLY_CALL_LIMIT` calls per UTC calendar month (default `1000`;
-Scott's call — at ~$0.02 avg per-call price, $9/mo breaks even at ~450 calls,
-so 1000 gives headroom). The counter is per subscriber-key hash in the same
+`SUBSCRIBER_MONTHLY_CREDIT_LIMIT` credits per UTC calendar month (default
+`1000` — i.e. **$10 of API calls included with the $9/mo plan**; Scott's
+call). 1 credit = $0.01 of x402 list price, so an expensive tool costs more
+credits than a cheap one. The counter is per subscriber-key hash in the same
 SQLite DB and resets automatically at the month boundary. Over the cap,
-subscriber-key requests get **HTTP 429** with the cap, current usage, the
+subscriber-key requests get **HTTP 429** with the cap, current credit usage, the
 period, the reset date (first of next month UTC), and a note that per-call
 x402 payment still works (resend without `X-Subscriber-Key` + an `X-Payment`
 header). The cap applies to subscriber-key auth only — plain x402 payers are
-never capped.
+never capped. `GET /billing/usage` (authed by `X-Subscriber-Key`) reports
+current credit usage and is always free — it's exempt from both x402 charges
+and the cap.
 
 Safety rails: both systems require their full config or they stay **disabled**
 (fail closed) with an ERROR at startup. If x402 is live the server logs a
