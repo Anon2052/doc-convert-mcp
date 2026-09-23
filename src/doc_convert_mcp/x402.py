@@ -326,7 +326,7 @@ def payment_required_response(
     return JSONResponse(status_code=402, content=content)
 
 
-def subscriber_fair_use_exceeded_response(usage: dict) -> JSONResponse:
+def subscriber_monthly_cap_exceeded_response(usage: dict) -> JSONResponse:
     """HTTP 429 for a subscriber over the monthly fair-use cap.
 
     The body is user-actionable: the cap, current usage, the period, the
@@ -337,7 +337,7 @@ def subscriber_fair_use_exceeded_response(usage: dict) -> JSONResponse:
     return JSONResponse(
         status_code=429,
         content={
-            "error": "subscriber_fair_use_exceeded",
+            "error": "subscriber_monthly_cap_exceeded",
             "message": (
                 f"Monthly fair-use cap reached: {usage['usage']}/{limit} calls "
                 f"in {usage['month']} (UTC). Your Pro subscription renews its "
@@ -460,7 +460,7 @@ class X402PaymentMiddleware(BaseHTTPMiddleware):
                     usage["limit"],
                     usage["month"],
                 )
-                return subscriber_fair_use_exceeded_response(usage)
+                return subscriber_monthly_cap_exceeded_response(usage)
             return await call_next(request)
 
         price, description, exempt = await self._resolve_price(request)
