@@ -8,3 +8,4 @@ dist/
 .env
 .env.*
 !.env.example
+data/  # runtime state: Stripe subscriber SQLite DB (key hashes)
