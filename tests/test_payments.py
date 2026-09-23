@@ -136,6 +136,7 @@ def test_enabled_but_incomplete_config_stays_disabled(monkeypatch, caplog):
 # ------------------------------------------------------------- 402 challenge shape
 def test_402_challenge_shape(monkeypatch):
     _enable_x402(monkeypatch)
+    monkeypatch.setenv("FREE_TIER_ENABLED", "0")  # test the x402 path, not the free bucket
     client = TestClient(create_app())
     r = client.post(
         "/convert/pdf", files={"file": ("t.pdf", make_pdf_bytes("Hi"), "application/pdf")}
@@ -156,6 +157,7 @@ def test_402_challenge_shape(monkeypatch):
 
 def test_per_tool_pricing_and_env_override(monkeypatch):
     _enable_x402(monkeypatch, X402_PRICE_OCR_IMAGE_USDC="0.05")
+    monkeypatch.setenv("FREE_TIER_ENABLED", "0")  # test the x402 path, not the free bucket
     client = TestClient(create_app())
     r = client.post("/convert/ocr", files={"file": ("t.png", b"x", "image/png")})
     assert r.status_code == 402
@@ -171,6 +173,7 @@ def test_per_tool_pricing_and_env_override(monkeypatch):
 
 def test_invalid_price_env_falls_back_to_default(monkeypatch):
     _enable_x402(monkeypatch, X402_PRICE_OCR_IMAGE_USDC="bogus")
+    monkeypatch.setenv("FREE_TIER_ENABLED", "0")  # test the x402 path, not the free bucket
     client = TestClient(create_app())
     r = client.post("/convert/ocr", files={"file": ("t.png", b"x", "image/png")})
     assert r.status_code == 402
@@ -195,6 +198,7 @@ def test_mcp_discovery_methods_exempt(monkeypatch):
 
 def test_mcp_tools_call_requires_payment(monkeypatch):
     _enable_x402(monkeypatch)
+    monkeypatch.setenv("FREE_TIER_ENABLED", "0")  # test the x402 path, not the free bucket
     client = TestClient(create_app())
     r = client.post(
         "/mcp",
@@ -211,6 +215,7 @@ def test_mcp_tools_call_requires_payment(monkeypatch):
 
 def test_mcp_unparseable_body_gets_default_price_not_500(monkeypatch):
     _enable_x402(monkeypatch)
+    monkeypatch.setenv("FREE_TIER_ENABLED", "0")  # test the x402 path, not the free bucket
     client = TestClient(create_app())
     r = client.post("/mcp", content=b"not json", headers={"Content-Type": "application/json"})
     assert r.status_code == 402  # default price, not a 500
@@ -559,6 +564,7 @@ def test_webhook_subscription_updated_syncs_status(monkeypatch, tmp_path):
 
 def test_subscriber_key_bypasses_x402(monkeypatch, tmp_path, fake_facilitator):
     _enable_x402(monkeypatch)
+    monkeypatch.setenv("FREE_TIER_ENABLED", "0")  # test the x402 path, not the free bucket
     _enable_stripe(monkeypatch, tmp_path)
     raw = billing.create_subscriber("cus_bypass", "a@b.c")
     client = TestClient(create_app())

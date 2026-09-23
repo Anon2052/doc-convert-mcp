@@ -36,6 +36,7 @@ def test_legal_routes_never_402_when_x402_enabled(monkeypatch, route):
     monkeypatch.setenv("X402_ENABLED", "true")
     monkeypatch.setenv("X402_PAY_TO", "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
     monkeypatch.setenv("X402_FACILITATOR_URL", "https://x402.org/facilitator")
+    monkeypatch.setenv("FREE_TIER_ENABLED", "0")  # test the x402 gate, not the free bucket
     client = TestClient(create_app())
     # Legal docs stay free; a paid path with no X-Payment header still 402s,
     # proving the x402 gate is actually active for this client.

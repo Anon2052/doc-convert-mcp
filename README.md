@@ -168,6 +168,40 @@ never capped. `GET /billing/usage` (authed by `X-Subscriber-Key`) reports
 current credit usage and is always free — it's exempt from both x402 charges
 and the cap.
 
+### Anonymous free tier
+
+On by default. Callers with no subscriber key and no x402 payment get a
+monthly bucket of `FREE_MONTHLY_CREDITS` credits (default **50** — i.e. $0.50
+of list-price calls, e.g. ~16 PDF conversions; Scott's call), keyed by client
+IP (first `X-Forwarded-For` entry — Render-aware; only the SHA-256 hash of the
+IP is stored, never the raw IP). Same credit math as subscribers
+(`credits_for_price` on the single x402 price map — no duplicated price table).
+
+Middleware order: valid `X-Subscriber-Key` → subscriber path (cap code
+`subscriber_monthly_cap_exceeded` untouched); else a call presenting
+`X-Payment` → x402 verification (never touches the free bucket); else free
+bucket → deduct and serve; else `402`. An exhausted bucket returns **402**
+(not 429 — 429 stays exclusively for the subscriber cap) with
+`error: "free_tier_exhausted"` plus `credits_used`, `free_limit`, `resets_at`,
+and `upgrade_hint` (pay per-call via x402, or Pro $9/mo with $10 of calls).
+Denied/exhausted calls never consume credits. `FREE_TIER_ENABLED=false`
+skips the free path entirely (falls straight to the x402 402 challenge).
+The existing 60/min per-IP rate limit stays as the abuse backstop.
+
+### Usage analytics
+
+Every served tool call rolls into a `usage_daily` table (same SQLite DB):
+per-day, per-tool, per-plan-type (`free` | `subscriber` | `x402`) aggregates
+of `calls` and `credits` — credits actually deducted (free/subscriber) or the
+list-price credits that would have been charged (x402); zero-credit outcomes
+record as 0. No PII: IPs are never stored in rollups, only aggregates.
+
+`GET /billing/stats?days=30` returns per-day aggregates plus totals, authed by
+the `ADMIN_KEY` shared secret (`X-Admin-Key` header or `?admin_key=` param;
+401 otherwise — also 401 when `ADMIN_KEY` isn't configured at all). The
+endpoint is cheap and un-metered: never consumes quota. `days` clamps to
+1–365.
+
 Safety rails: both systems require their full config or they stay **disabled**
 (fail closed) with an ERROR at startup. If x402 is live the server logs a
 warning naming real USDC charges. No secrets ever appear in code, logs, or

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.responses import JSONResponse
@@ -22,6 +23,7 @@ from . import __version__
 from .billing import (
     create_checkout_session,
     get_subscriber_credit_usage,
+    get_usage_stats,
     handle_stripe_webhook,
     issue_key_for_session,
     stripe_effective_enabled,
@@ -221,6 +223,31 @@ def create_app(rate_limit: str | None = None) -> FastAPI:
             "stripe_enabled": stripe_effective_enabled(),
             "x402_enabled": x402_effective_enabled(),
         }
+
+    # --- Usage analytics (admin only) --------------------------------------
+    @app.get("/billing/stats")
+    async def billing_stats(request: Request, days: int = 30):  # noqa: ANN001, ANN202
+        """Per-day usage aggregates + totals for the last ``days`` UTC days.
+
+        Authed by the ``ADMIN_KEY`` shared secret (``X-Admin-Key`` header or
+        ``?admin_key=`` query param). Always free: ``/billing/*`` is exempt
+        from the x402 middleware and this route has no rate limiter, so
+        reading stats never consumes quota. 401 when the key is missing or
+        mismatched — and also when ``ADMIN_KEY`` isn't configured at all
+        (fail closed).
+        """
+        expected = os.environ.get("ADMIN_KEY", "")
+        provided = request.headers.get("x-admin-key") or request.query_params.get("admin_key") or ""
+        if not expected or not secrets.compare_digest(provided, expected):
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "error": "unauthorized",
+                    "message": "Valid X-Admin-Key header or admin_key query param required.",
+                },
+            )
+        clamped = max(1, min(days, 365))
+        return get_usage_stats(clamped)
 
     # MCP over streamable HTTP, mounted at /mcp (stateless: safe to mount).
     app.mount("/mcp", mcp_asgi)
