@@ -6,8 +6,19 @@ services:
     healthCheckPath: /health
     plan: starter
     autoDeploy: true
+    # Persistent disk for the subscriber SQLite DB (billed $0.25/GB/mo;
+    # 1 GB = $0.25/mo). Only files under mountPath survive redeploys.
+    # BILLING_DB_PATH is set explicitly below: Render does not remove env vars
+    # deleted from render.yaml, so omitting it would leave the live service pinned
+    # to the old ./data path even after the disk attaches.
+    disk:
+      name: doc-convert-data
+      mountPath: /var/lib/doc-convert-mcp
+      sizeGB: 1
     envVars:
       - key: X402_ENABLED
         value: "false"
+      - key: BILLING_DB_PATH
+        value: "/var/lib/doc-convert-mcp/billing.db"
       - key: RATE_LIMIT
         value: 60/minute

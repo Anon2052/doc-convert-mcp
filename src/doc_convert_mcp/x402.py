@@ -36,7 +36,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from .billing import stripe_effective_enabled, subscriber_key_valid
+from .billing import (
+    record_subscriber_call,
+    stripe_effective_enabled,
+    subscriber_key_valid,
+)
 
 log = logging.getLogger("doc_convert_mcp.x402")
 
@@ -322,6 +326,34 @@ def payment_required_response(
     return JSONResponse(status_code=402, content=content)
 
 
+def subscriber_fair_use_exceeded_response(usage: dict) -> JSONResponse:
+    """HTTP 429 for a subscriber over the monthly fair-use cap.
+
+    The body is user-actionable: the cap, current usage, the period, the
+    reset date (first of next month, UTC), and the per-call x402 fallback —
+    never silently served.
+    """
+    limit = usage["limit"]
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": "subscriber_fair_use_exceeded",
+            "message": (
+                f"Monthly fair-use cap reached: {usage['usage']}/{limit} calls "
+                f"in {usage['month']} (UTC). Your Pro subscription renews its "
+                f"allowance on {usage['resets_at']}. Until then, per-call x402 "
+                "payment still works: resend this request WITHOUT the "
+                "X-Subscriber-Key header and include a valid X-Payment "
+                "authorization."
+            ),
+            "limit": limit,
+            "usage": usage["usage"],
+            "period": usage["month"],
+            "resets_at": usage["resets_at"],
+        },
+    )
+
+
 def decode_x_payment(raw: str) -> dict | None:
     """Base64-decode the X-Payment header into a v1 payment payload dict."""
     try:
@@ -416,9 +448,19 @@ class X402PaymentMiddleware(BaseHTTPMiddleware):
         if not x402_effective_enabled():
             return await call_next(request)
 
-        # Stripe subscriber bypass: a valid subscriber key skips per-call x402.
+        # Stripe subscriber bypass: a valid subscriber key skips per-call x402,
+        # subject to the Pro monthly fair-use cap.
         sub_key = request.headers.get("x-subscriber-key")
         if sub_key and stripe_effective_enabled() and subscriber_key_valid(sub_key):
+            usage = record_subscriber_call(sub_key)
+            if usage["usage"] > usage["limit"]:
+                log.info(
+                    "Subscriber fair-use cap exceeded: %d/%d calls in %s",
+                    usage["usage"],
+                    usage["limit"],
+                    usage["month"],
+                )
+                return subscriber_fair_use_exceeded_response(usage)
             return await call_next(request)
 
         price, description, exempt = await self._resolve_price(request)

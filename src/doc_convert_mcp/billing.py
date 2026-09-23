@@ -34,6 +34,15 @@ CREATE TABLE IF NOT EXISTS subscribers (
   updated_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_subscribers_customer ON subscribers(customer_id);
+-- Fair-use counter for Pro subscribers: calls per subscriber key, per UTC
+-- calendar month. Row-per-month means a new month starts a fresh counter
+-- automatically (no rollover job needed).
+CREATE TABLE IF NOT EXISTS subscriber_usage (
+  key_hash TEXT NOT NULL,
+  month    TEXT NOT NULL,
+  calls    INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (key_hash, month)
+);
 """
 
 _db_lock = threading.Lock()
@@ -61,9 +70,15 @@ def stripe_effective_enabled() -> bool:
     return True
 
 
+#: Default subscriber DB path: the Render persistent disk mount (see
+#: render.yaml ``disk:``). Overridable with ``BILLING_DB_PATH`` — tests and
+#: local dev point it at a temp dir instead.
+DEFAULT_BILLING_DB_PATH = "/var/lib/doc-convert-mcp/billing.db"
+
+
 def billing_db_path() -> str:
-    return os.environ.get("BILLING_DB_PATH", "./data/subscribers.db").strip() or (
-        "./data/subscribers.db"
+    return os.environ.get("BILLING_DB_PATH", DEFAULT_BILLING_DB_PATH).strip() or (
+        DEFAULT_BILLING_DB_PATH
     )
 
 
@@ -132,6 +147,78 @@ def subscriber_key_valid(raw_key: str | None) -> bool:
             (hash_subscriber_key(raw_key.strip()),),
         ).fetchone()
     return row is not None and row[0] == "active"
+
+
+# --- Fair-use cap for Pro subscribers ---------------------------------------
+#: Default monthly call cap per subscriber key. Business knob: at ~$0.02 avg
+#: per-call price, $9/mo breaks even at ~450 calls; 1000 gives headroom.
+#: Scott's call — override with SUBSCRIBER_MONTHLY_CALL_LIMIT.
+DEFAULT_SUBSCRIBER_MONTHLY_CALL_LIMIT = 1000
+
+
+def subscriber_monthly_call_limit() -> int:
+    """Monthly call cap per subscriber key; invalid/non-positive -> default."""
+    raw = os.environ.get("SUBSCRIBER_MONTHLY_CALL_LIMIT", "").strip()
+    try:
+        value = int(raw) if raw else DEFAULT_SUBSCRIBER_MONTHLY_CALL_LIMIT
+    except ValueError:
+        log.warning(
+            "Invalid SUBSCRIBER_MONTHLY_CALL_LIMIT=%r; using default %d.",
+            raw,
+            DEFAULT_SUBSCRIBER_MONTHLY_CALL_LIMIT,
+        )
+        return DEFAULT_SUBSCRIBER_MONTHLY_CALL_LIMIT
+    if value <= 0:
+        log.warning(
+            "Non-positive SUBSCRIBER_MONTHLY_CALL_LIMIT=%r; using default %d.",
+            raw,
+            DEFAULT_SUBSCRIBER_MONTHLY_CALL_LIMIT,
+        )
+        return DEFAULT_SUBSCRIBER_MONTHLY_CALL_LIMIT
+    return value
+
+
+def current_month_utc() -> str:
+    """Current calendar month (UTC) as 'YYYY-MM'. Small and patchable for tests."""
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+def month_reset_iso(month: str) -> str:
+    """First instant of the month after ``month`` (UTC), ISO-8601.
+
+    This is when a subscriber's fair-use counter resets.
+    """
+    year, mon = map(int, month.split("-"))
+    nxt = datetime(year + (mon == 12), mon % 12 + 1, 1, tzinfo=timezone.utc)
+    return nxt.isoformat()
+
+
+def record_subscriber_call(raw_key: str) -> dict:
+    """Increment this subscriber key's call counter for the current UTC month.
+
+    Returns ``{"month", "usage", "limit", "resets_at"}`` — the counter row is
+    created on first use of the month, so the cap auto-resets at the
+    calendar-month boundary with no rollover job.
+    """
+    key_hash = hash_subscriber_key(raw_key.strip())
+    month = current_month_utc()
+    limit = subscriber_monthly_call_limit()
+    with _db_lock, _connect() as conn:
+        conn.execute(
+            "INSERT INTO subscriber_usage (key_hash, month, calls) VALUES (?, ?, 1)"
+            " ON CONFLICT (key_hash, month) DO UPDATE SET calls = calls + 1",
+            (key_hash, month),
+        )
+        (usage,) = conn.execute(
+            "SELECT calls FROM subscriber_usage WHERE key_hash = ? AND month = ?",
+            (key_hash, month),
+        ).fetchone()
+    return {
+        "month": month,
+        "usage": usage,
+        "limit": limit,
+        "resets_at": month_reset_iso(month),
+    }
 
 
 def _stripe() -> stripe:
