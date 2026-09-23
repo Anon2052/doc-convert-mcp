@@ -87,7 +87,7 @@ def test_subscriber_over_cap_gets_actionable_429(monkeypatch, tmp_path):
     assert r.status_code == 429, r.text
     body = r.json()
     month = billing.current_month_utc()
-    assert body["error"] == "subscriber_fair_use_exceeded"
+    assert body["error"] == "subscriber_monthly_cap_exceeded"
     assert body["limit"] == 2
     assert body["usage"] == 3
     assert body["period"] == month
@@ -109,7 +109,7 @@ def test_cap_covers_mcp_tool_calls(monkeypatch, tmp_path):
         assert r.status_code == 200, r.text[:400]
         r = _mcp_tool_call(client, headers=headers)
         assert r.status_code == 429, r.text[:400]
-        assert r.json()["error"] == "subscriber_fair_use_exceeded"
+        assert r.json()["error"] == "subscriber_monthly_cap_exceeded"
 
 
 def test_month_rollover_resets_counter(monkeypatch, tmp_path):
