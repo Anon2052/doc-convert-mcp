@@ -61,9 +61,15 @@ def stripe_effective_enabled() -> bool:
     return True
 
 
+#: Default subscriber DB path: the Render persistent disk mount (see
+#: render.yaml ``disk:``). Overridable with ``BILLING_DB_PATH`` — tests and
+#: local dev point it at a temp dir instead.
+DEFAULT_BILLING_DB_PATH = "/var/lib/doc-convert-mcp/billing.db"
+
+
 def billing_db_path() -> str:
-    return os.environ.get("BILLING_DB_PATH", "./data/subscribers.db").strip() or (
-        "./data/subscribers.db"
+    return os.environ.get("BILLING_DB_PATH", DEFAULT_BILLING_DB_PATH).strip() or (
+        DEFAULT_BILLING_DB_PATH
     )
 
 

@@ -27,6 +27,7 @@ Runner-up: **Fly.io** if you later want multi-region (35+ regions) or finer cost
 | `HOST` | `0.0.0.0` | |
 | `X402_ENABLED` | `false` | **Leave off.** On-chain payment verification is a structural stub, not prod-ready |
 | `RATE_LIMIT` | `60/minute` | e.g. `600/hour` |
+| `BILLING_DB_PATH` | `/var/lib/doc-convert-mcp/billing.db` | Subscriber SQLite DB; override for local dev (e.g. `./data/subscribers.db`) |
 | `X402_PRICE_USDC` / `X402_PAY_TO` | unset | Only relevant when x402 verification is real |
 
 No secrets are required to run the service. Nothing is hardcoded in the image.
@@ -42,6 +43,16 @@ No secrets are required to run the service. Nothing is hardcoded in the image.
 6. Custom domain: **Settings → Custom Domains** (free, TLS automatic).
 
 Or one-click via blueprint: `render.yaml` is in the repo root — **New → Blueprint** and point at the repo.
+
+> **Persistent disk (subscriber DB).** `render.yaml` attaches a 1 GB persistent
+> disk mounted at `/var/lib/doc-convert-mcp` ($0.25/GB/mo → **$0.25/mo**; disks
+> require a paid plan — Starter counts). The subscriber SQLite DB lives on it
+> (`BILLING_DB_PATH` default `.../billing.db`), so issued subscriber keys
+> survive redeploys. After merging a Blueprint change that adds the disk,
+> check **Dashboard → service → Disk** to confirm it's attached (if Blueprint
+> auto-sync is off, hit **Sync** on the Blueprint first). Note: a disk-backed
+> service can't scale past one instance and loses zero-downtime deploys
+> (brief restart on each deploy) — that's Render's documented tradeoff.
 
 ### Railway
 1. railway.app → **New Project → Deploy from GitHub** → select the repo.

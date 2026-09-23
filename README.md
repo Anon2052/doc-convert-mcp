@@ -137,7 +137,8 @@ x402.org testnet facilitator).
 Also off by default. A Stripe subscription issues a subscriber key that
 bypasses per-call x402 charges (send as `X-Subscriber-Key` header). Only the
 SHA-256 hash of each key is stored (SQLite, `BILLING_DB_PATH`, default
-`./data/subscribers.db`).
+`/var/lib/doc-convert-mcp/billing.db` — the Render persistent disk mount; set
+`BILLING_DB_PATH=./data/subscribers.db` for local dev).
 
 ```bash
 export STRIPE_ENABLED=true
