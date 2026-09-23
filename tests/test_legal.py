@@ -25,9 +25,10 @@ def test_legal_route_serves_markdown(client, route, heading):
     r = client.get(route)
     assert r.status_code == 200, r.text
     assert "text/markdown" in r.headers["content-type"]
-    # Verbatim, unfilled template: the heading and the placeholder both present.
+    # Verbatim, filled-in document: the heading and the company name both present.
     assert heading in r.text
-    assert "[LLC NAME]" in r.text
+    assert "IOConnex LLC" in r.text
+    assert "[LLC NAME]" not in r.text
 
 
 @pytest.mark.parametrize("route", list(ROUTES))
