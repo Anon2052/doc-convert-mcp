@@ -15,6 +15,7 @@ from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
+from starlette.responses import Response
 from starlette.routing import Route
 
 from . import __version__
@@ -26,6 +27,7 @@ from .billing import (
 )
 from .converters import ConversionError, ocr_image, parse_spreadsheet, pdf_to_markdown
 from .converters import url_to_clean_text as _url_to_clean_text
+from .legal_docs import PRIVACY_POLICY, REFUND_POLICY, TERMS_OF_SERVICE
 from .mcp_server import mcp
 from .x402 import X402PaymentMiddleware, warn_if_payments_misconfigured, x402_effective_enabled
 
@@ -107,6 +109,21 @@ def create_app(rate_limit: str | None = None) -> FastAPI:
             "x402": "enabled" if x402_effective_enabled() else "disabled",
             "stripe": "enabled" if stripe_effective_enabled() else "disabled",
         }
+
+    # --- Legal documents: public, always free (Stripe onboarding URLs) -------
+    # No @limiter.limit on these: informational endpoints should never 429 or
+    # 402. EXEMPT_PREFIXES in x402.py covers the whole /legal prefix.
+    @app.get("/legal/terms", include_in_schema=False)
+    async def legal_terms():
+        return Response(content=TERMS_OF_SERVICE, media_type="text/markdown; charset=utf-8")
+
+    @app.get("/legal/privacy", include_in_schema=False)
+    async def legal_privacy():
+        return Response(content=PRIVACY_POLICY, media_type="text/markdown; charset=utf-8")
+
+    @app.get("/legal/refunds", include_in_schema=False)
+    async def legal_refunds():
+        return Response(content=REFUND_POLICY, media_type="text/markdown; charset=utf-8")
 
     @app.post("/convert/pdf")
     @limiter.limit(limit)

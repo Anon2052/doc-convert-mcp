@@ -54,7 +54,8 @@ FACILITATOR_TIMEOUT = 15.0
 #: facilitator (https://api.cdp.coinbase.com/platform/v2/x402) with CDP creds.
 DEFAULT_FACILITATOR_URL = "https://x402.org/facilitator"
 
-# Paths that never require payment (health checks, docs, billing endpoints).
+# Paths that never require payment (health checks, docs, billing endpoints,
+# legal documents).
 EXEMPT_PREFIXES = (
     "/health",
     "/docs",
@@ -62,6 +63,7 @@ EXEMPT_PREFIXES = (
     "/openapi.json",
     "/favicon.ico",
     "/billing",
+    "/legal",
 )
 
 # JSON-RPC methods that are discovery, not paid tool calls.
