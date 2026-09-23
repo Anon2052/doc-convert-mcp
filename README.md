@@ -154,6 +154,17 @@ Endpoints: `POST /billing/checkout` → `{"checkout_url": ...}`;
 `GET /billing/key?session_id=...` → `{"subscriber_key": ...}` (shown once);
 `GET /billing/status` → `{"stripe_enabled": bool, "x402_enabled": bool}`.
 
+**Fair-use cap (Pro).** Subscriber-key auth is capped at
+`SUBSCRIBER_MONTHLY_CALL_LIMIT` calls per UTC calendar month (default `1000`;
+Scott's call — at ~$0.02 avg per-call price, $9/mo breaks even at ~450 calls,
+so 1000 gives headroom). The counter is per subscriber-key hash in the same
+SQLite DB and resets automatically at the month boundary. Over the cap,
+subscriber-key requests get **HTTP 429** with the cap, current usage, the
+period, the reset date (first of next month UTC), and a note that per-call
+x402 payment still works (resend without `X-Subscriber-Key` + an `X-Payment`
+header). The cap applies to subscriber-key auth only — plain x402 payers are
+never capped.
+
 Safety rails: both systems require their full config or they stay **disabled**
 (fail closed) with an ERROR at startup. If x402 is live the server logs a
 warning naming real USDC charges. No secrets ever appear in code, logs, or

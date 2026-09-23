@@ -28,6 +28,7 @@ Runner-up: **Fly.io** if you later want multi-region (35+ regions) or finer cost
 | `X402_ENABLED` | `false` | **Leave off.** On-chain payment verification is a structural stub, not prod-ready |
 | `RATE_LIMIT` | `60/minute` | e.g. `600/hour` |
 | `BILLING_DB_PATH` | `/var/lib/doc-convert-mcp/billing.db` | Subscriber SQLite DB; override for local dev (e.g. `./data/subscribers.db`) |
+| `SUBSCRIBER_MONTHLY_CALL_LIMIT` | `1000` | Pro fair-use cap: subscriber-key calls per UTC calendar month (invalid/non-positive → default) |
 | `X402_PRICE_USDC` / `X402_PAY_TO` | unset | Only relevant when x402 verification is real |
 
 No secrets are required to run the service. Nothing is hardcoded in the image.
