@@ -29,6 +29,9 @@ Runner-up: **Fly.io** if you later want multi-region (35+ regions) or finer cost
 | `RATE_LIMIT` | `60/minute` | e.g. `600/hour` |
 | `BILLING_DB_PATH` | `/var/lib/doc-convert-mcp/billing.db` | Subscriber SQLite DB; override for local dev (e.g. `./data/subscribers.db`) |
 | `SUBSCRIBER_MONTHLY_CREDIT_LIMIT` | `1000` | Pro fair-use cap: subscriber-key credits per UTC calendar month (1 credit = $0.01 of x402 list price; invalid/non-positive → default) |
+| `FREE_TIER_ENABLED` | `true` | Anonymous free tier kill switch — `false`/`0` skips the free path (straight to x402 402) |
+| `FREE_MONTHLY_CREDITS` | `50` | Free-tier credit bucket per client IP per UTC month (invalid/non-positive → default) |
+| `ADMIN_KEY` | unset | **Required for `/billing/stats`** — long random shared secret; send as `X-Admin-Key` header or `?admin_key=` param |
 | `X402_PRICE_USDC` / `X402_PAY_TO` | unset | Only relevant when x402 verification is real |
 
 No secrets are required to run the service. Nothing is hardcoded in the image.

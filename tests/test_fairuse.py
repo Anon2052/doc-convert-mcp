@@ -184,10 +184,33 @@ def test_x402_per_call_payers_are_never_capped(monkeypatch, tmp_path, fake_facil
     assert len(_usage_rows(tmp_path)) == 1
 
 
-def test_invalid_key_is_not_counted_and_still_402(monkeypatch, tmp_path, fake_facilitator):
+def test_invalid_key_falls_through_to_free_tier_not_subscriber_cap(
+    monkeypatch, tmp_path, fake_facilitator
+):
+    """A bogus subscriber key is not a *valid* key, so the middleware order
+    (valid key -> subscriber path; x402-paid -> exempt; else free bucket)
+    serves it from the anonymous free tier — never from the subscriber cap,
+    and never counted against subscriber usage."""
     _enable_x402(monkeypatch)
     _enable_stripe(monkeypatch, tmp_path)
     monkeypatch.setenv("SUBSCRIBER_MONTHLY_CREDIT_LIMIT", "1")
+    r = _pdf_post(
+        TestClient(create_app()),
+        headers={"X-Subscriber-Key": "bogus", "X-Forwarded-For": "9.9.9.9"},
+    )
+    assert r.status_code == 200, r.text  # free tier, not 402
+    assert _usage_rows(tmp_path) == []  # subscriber usage untouched
+    conn = sqlite3.connect(str(tmp_path / "subscribers.db"))
+    free_rows = conn.execute("SELECT credits FROM free_usage").fetchall()
+    assert free_rows[0][0] == pytest.approx(3.0)  # deducted from the free bucket
+
+
+def test_invalid_key_still_402_when_free_tier_disabled(monkeypatch, tmp_path, fake_facilitator):
+    """FREE_TIER_ENABLED=0: the free path is skipped, so a bogus key with no
+    payment falls straight to the x402 402 challenge."""
+    _enable_x402(monkeypatch)
+    _enable_stripe(monkeypatch, tmp_path)
+    monkeypatch.setenv("FREE_TIER_ENABLED", "0")
     r = _pdf_post(TestClient(create_app()), headers={"X-Subscriber-Key": "bogus"})
     assert r.status_code == 402
     assert _usage_rows(tmp_path) == []

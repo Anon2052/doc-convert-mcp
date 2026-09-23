@@ -37,9 +37,12 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .billing import (
+    free_tier_enabled,
     record_subscriber_credits,
+    record_usage,
     stripe_effective_enabled,
     subscriber_key_valid,
+    try_consume_free_credits,
 )
 
 log = logging.getLogger("doc_convert_mcp.x402")
@@ -322,7 +325,9 @@ def payment_required_response(
         or (
             "This endpoint requires an x402 USDC micropayment on Base. "
             "Send an X-Payment header with the base64-encoded v1 payment payload "
-            "containing a signed EIP-3009 authorization."
+            "containing a signed EIP-3009 authorization. Alternatively, subscribe "
+            "to Pro for $9/mo (includes $10 of API calls) and send your "
+            "X-Subscriber-Key."
         ),
         "accepts": {
             "asset": USDC_BASE_CONTRACT,
@@ -365,6 +370,56 @@ def subscriber_monthly_cap_exceeded_response(usage: dict) -> JSONResponse:
             "resets_at": usage["resets_at"],
         },
     )
+
+
+def free_tier_exhausted_response(usage: dict) -> JSONResponse:
+    """HTTP 402 for a client IP over the monthly free credit bucket.
+
+    402, NOT 429 — 429 stays exclusively for the subscriber fair-use cap.
+    The body is user-actionable: credits used vs the free limit, the reset
+    date (first of next month UTC), and how to keep calling (pay per-call via
+    x402, or subscribe to Pro for $9/mo — $10 of calls included).
+    """
+    limit = usage["free_limit"]
+    return JSONResponse(
+        status_code=402,
+        content={
+            "error": "free_tier_exhausted",
+            "message": (
+                f"Free tier exhausted: {usage['credits_used']}/{limit} credits "
+                f"used in {usage['month']} (UTC); the bucket resets on "
+                f"{usage['resets_at']}. To keep calling now, pay per-call via "
+                "x402 (resend this request with a valid X-Payment "
+                "authorization) or subscribe to Pro for $9/mo — includes $10 "
+                "of API calls — and send your X-Subscriber-Key."
+            ),
+            "credits_used": usage["credits_used"],
+            "free_limit": limit,
+            "resets_at": usage["resets_at"],
+            "upgrade_hint": (
+                "Pay per-call with an X-Payment x402 authorization, or "
+                "subscribe to Pro ($9/mo, $10 of calls included) and use "
+                "X-Subscriber-Key."
+            ),
+        },
+    )
+
+
+def client_ip(request: Request) -> str:
+    """Client IP for the free-tier bucket, Render-aware.
+
+    First entry of ``X-Forwarded-For`` when present (Render terminates TLS at
+    its edge and forwards the real client IP); otherwise the direct peer
+    address. Only the SHA-256 hash is ever stored — see
+    :func:`billing.hash_client_ip`.
+    """
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first
+    client = request.client
+    return client.host if client else "unknown"
 
 
 def decode_x_payment(raw: str) -> dict | None:
@@ -459,7 +514,15 @@ class X402PaymentMiddleware(BaseHTTPMiddleware):
             # MCP discovery/info GETs stay free; tool calls are POST.
             return await call_next(request)
         if not x402_effective_enabled():
-            return await call_next(request)
+            # Unmetered: serve everything. Analytics records these as
+            # zero-credit "free" calls (nothing deducted, nothing paid).
+            # Price resolution happens BEFORE serving: downstream consumes the
+            # request body stream.
+            _, _, exempt, tool_label = await self._resolve_price(request)
+            response = await call_next(request)
+            if not exempt:
+                self._record_served_call(tool_label, "free", 0.0)
+            return response
 
         # Stripe subscriber bypass: a valid subscriber key skips per-call x402,
         # subject to the Pro monthly fair-use CREDIT cap. The credit cost of
@@ -467,7 +530,7 @@ class X402PaymentMiddleware(BaseHTTPMiddleware):
         # so expensive tools cost more credits than cheap ones.
         sub_key = request.headers.get("x-subscriber-key")
         if sub_key and stripe_effective_enabled() and subscriber_key_valid(sub_key):
-            price, _, exempt = await self._resolve_price(request)
+            price, _, exempt, tool_label = await self._resolve_price(request)
             if exempt:
                 # Free discovery/info calls cost nothing and are never capped.
                 return await call_next(request)
@@ -481,11 +544,34 @@ class X402PaymentMiddleware(BaseHTTPMiddleware):
                     usage["month"],
                 )
                 return subscriber_monthly_cap_exceeded_response(usage)
-            return await call_next(request)
+            response = await call_next(request)
+            self._record_served_call(tool_label, "subscriber", credit_cost)
+            return response
 
-        price, description, exempt = await self._resolve_price(request)
+        price, description, exempt, tool_label = await self._resolve_price(request)
         if exempt:
             return await call_next(request)
+
+        # Anonymous free tier: no valid subscriber key and no x402 payment
+        # presented. A call presenting X-Payment goes through the payment flow
+        # below and never touches the free bucket. Denied/exhausted calls
+        # consume nothing (check-then-deduct is atomic in
+        # try_consume_free_credits). FREE_TIER_ENABLED=false skips this branch
+        # entirely — the request falls straight to the 402 challenge.
+        if not request.headers.get("x-payment") and free_tier_enabled():
+            credit_cost = credits_for_price(price)
+            served, usage = try_consume_free_credits(client_ip(request), credit_cost)
+            if not served:
+                log.info(
+                    "Free tier exhausted: %s/%s credits in %s",
+                    usage["credits_used"],
+                    usage["free_limit"],
+                    usage["month"],
+                )
+                return free_tier_exhausted_response(usage)
+            response = await call_next(request)
+            self._record_served_call(tool_label, "free", credit_cost)
+            return response
 
         resource = str(request.url)
         requirements = build_payment_requirements(price, resource, description)
@@ -578,11 +664,24 @@ class X402PaymentMiddleware(BaseHTTPMiddleware):
                     requirements["maxAmountRequired"],
                     receipt,
                 )
+        # Paid and served: analytics credits are the list-price credits that
+        # WOULD have been charged (the payment itself was USDC, not credits).
+        self._record_served_call(tool_label, "x402", credits_for_price(price))
         return response
 
-    async def _resolve_price(self, request: Request) -> tuple[Decimal, str, bool]:
-        """Return (price_usdc, description, exempt). Unparseable bodies get the
-        default price, never a 500."""
+    def _record_served_call(self, tool_label: str, plan_type: str, credits: float) -> None:
+        """Best-effort usage analytics: a failed write must never break serving."""
+        if not tool_label:
+            return
+        try:
+            record_usage(tool_label, plan_type, credits)
+        except Exception:  # noqa: BLE001 — analytics is observability, not gating
+            log.exception("usage analytics write failed (non-fatal)")
+
+    async def _resolve_price(self, request: Request) -> tuple[Decimal, str, bool, str]:
+        """Return (price_usdc, description, exempt, tool_label). Unparseable
+        bodies get the default price, never a 500. ``tool_label`` is the
+        per-tool name for the usage-analytics rollup ("" when exempt)."""
         path = request.url.path
         method = request.method
         if path.startswith("/mcp") and method == "POST":
@@ -590,23 +689,24 @@ class X402PaymentMiddleware(BaseHTTPMiddleware):
                 body = await request.body()
                 message = json.loads(body)
             except (ValueError, json.JSONDecodeError):
-                return x402_price_usdc(), "MCP request", False
+                return x402_price_usdc(), "MCP request", False, "mcp_request"
             rpc_method = message.get("method") if isinstance(message, dict) else None
             if rpc_method in DISCOVERY_METHODS or (
                 isinstance(rpc_method, str) and rpc_method.startswith("notifications/")
             ):
-                return Decimal("0"), "", True  # discovery stays free
+                return Decimal("0"), "", True, ""  # discovery stays free
             if rpc_method == "tools/call":
                 params = message.get("params") if isinstance(message, dict) else None
                 tool = params.get("name") if isinstance(params, dict) else None
                 if isinstance(tool, str) and tool in TOOL_PRICES_USDC:
-                    return tool_price_usdc(tool), f"MCP tool '{tool}'", False
-                return x402_price_usdc(), f"MCP tool '{tool}'", False
-            return x402_price_usdc(), "MCP request", False
+                    return tool_price_usdc(tool), f"MCP tool '{tool}'", False, tool
+                label = tool if isinstance(tool, str) and tool else "mcp_tool_call"
+                return x402_price_usdc(), f"MCP tool '{tool}'", False, label
+            return x402_price_usdc(), "MCP request", False, "mcp_request"
         if method == "POST" and path in REST_TOOL_PRICES:
             tool = REST_TOOL_PRICES[path]
-            return tool_price_usdc(tool), f"REST {path} (tool '{tool}')", False
-        return x402_price_usdc(), f"{method} {path}", False
+            return tool_price_usdc(tool), f"REST {path} (tool '{tool}')", False, tool
+        return x402_price_usdc(), f"{method} {path}", False, f"{method} {path}"
 
 
 def warn_if_payments_misconfigured() -> None:

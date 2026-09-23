@@ -18,7 +18,7 @@ import os
 import secrets
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import stripe
 
@@ -43,6 +43,25 @@ CREATE TABLE IF NOT EXISTS subscriber_usage (
   month    TEXT NOT NULL,
   credits  REAL NOT NULL DEFAULT 0,
   PRIMARY KEY (key_hash, month)
+);
+-- Anonymous free tier: credits spent per client-IP hash, per UTC calendar
+-- month. Only the SHA-256 hash of the IP is stored — raw IPs never touch
+-- the disk (same treatment as subscriber keys).
+CREATE TABLE IF NOT EXISTS free_usage (
+  ip_hash TEXT NOT NULL,
+  month   TEXT NOT NULL,
+  credits REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (ip_hash, month)
+);
+-- Usage analytics rollup: per-day, per-tool, per-plan aggregates. No PII —
+-- IPs are never stored here, only counts and credit sums.
+CREATE TABLE IF NOT EXISTS usage_daily (
+  date      TEXT NOT NULL,
+  tool      TEXT NOT NULL,
+  plan_type TEXT NOT NULL,
+  calls     INTEGER NOT NULL DEFAULT 0,
+  credits   REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (date, tool, plan_type)
 );
 """
 
@@ -193,6 +212,11 @@ def current_month_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m")
 
 
+def current_date_utc() -> str:
+    """Current calendar date (UTC) as 'YYYY-MM-DD'. Small and patchable for tests."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
 def month_reset_iso(month: str) -> str:
     """First instant of the month after ``month`` (UTC), ISO-8601.
 
@@ -251,6 +275,161 @@ def get_subscriber_credit_usage(raw_key: str) -> dict:
         "resets_at": month_reset_iso(month),
         "period": month,
     }
+
+
+# --- Anonymous free tier ---------------------------------------------------
+#: Default monthly free credit bucket per client IP. 1 credit = $0.01 of x402
+#: list price, so 50 credits = $0.50 of calls (e.g. ~16 PDF conversions).
+#: Scott's call — override with FREE_MONTHLY_CREDITS.
+DEFAULT_FREE_MONTHLY_CREDITS = 50.0
+
+
+def free_tier_enabled() -> bool:
+    """Kill switch for the anonymous free tier. Default ON; false/0 skips the
+    free path entirely (requests fall straight to the x402 402 challenge)."""
+    return _env_flag("FREE_TIER_ENABLED", "true")
+
+
+def free_monthly_credits() -> float:
+    """Monthly free credit bucket per client IP; invalid/non-positive -> default."""
+    raw = os.environ.get("FREE_MONTHLY_CREDITS", "").strip()
+    try:
+        value = float(raw) if raw else DEFAULT_FREE_MONTHLY_CREDITS
+    except ValueError:
+        log.warning(
+            "Invalid FREE_MONTHLY_CREDITS=%r; using default %s.",
+            raw,
+            DEFAULT_FREE_MONTHLY_CREDITS,
+        )
+        return DEFAULT_FREE_MONTHLY_CREDITS
+    if value <= 0:
+        log.warning(
+            "Non-positive FREE_MONTHLY_CREDITS=%r; using default %s.",
+            raw,
+            DEFAULT_FREE_MONTHLY_CREDITS,
+        )
+        return DEFAULT_FREE_MONTHLY_CREDITS
+    return value
+
+
+def hash_client_ip(ip: str) -> str:
+    """SHA-256 of a client IP — raw IPs are never stored, like subscriber keys."""
+    return hashlib.sha256(ip.strip().encode("utf-8")).hexdigest()
+
+
+def try_consume_free_credits(ip: str, credits: float) -> tuple[bool, dict]:
+    """Atomically check-then-deduct from this IP's monthly free bucket.
+
+    Returns ``(served, usage)`` where ``usage`` is ``{"month",
+    "credits_used", "free_limit", "resets_at"}``. Denied (over-bucket) calls
+    consume NOTHING — the write only happens when the call fits the bucket.
+    Like the subscriber counter, the row-per-month layout auto-resets at the
+    UTC calendar-month boundary with no rollover job.
+    """
+    ip_hash = hash_client_ip(ip)
+    month = current_month_utc()
+    limit = free_monthly_credits()
+    with _db_lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT credits FROM free_usage WHERE ip_hash = ? AND month = ?",
+            (ip_hash, month),
+        ).fetchone()
+        used = row[0] if row else 0.0
+        if used + credits > limit:
+            return False, {
+                "month": month,
+                "credits_used": used,
+                "free_limit": limit,
+                "resets_at": month_reset_iso(month),
+            }
+        conn.execute(
+            "INSERT INTO free_usage (ip_hash, month, credits) VALUES (?, ?, ?)"
+            " ON CONFLICT (ip_hash, month) DO UPDATE SET"
+            " credits = credits + excluded.credits",
+            (ip_hash, month, credits),
+        )
+        (used,) = conn.execute(
+            "SELECT credits FROM free_usage WHERE ip_hash = ? AND month = ?",
+            (ip_hash, month),
+        ).fetchone()
+    return True, {
+        "month": month,
+        "credits_used": used,
+        "free_limit": limit,
+        "resets_at": month_reset_iso(month),
+    }
+
+
+# --- Usage analytics ---------------------------------------------------------
+#: Plan-type buckets for the usage rollup. "free" = anonymous free-tier (or
+#: unmetered traffic when payments are off), "subscriber" = Pro key auth,
+#: "x402" = per-call USDC payers.
+PLAN_TYPES = ("free", "subscriber", "x402")
+
+
+def record_usage(tool: str, plan_type: str, credits: float) -> None:
+    """Roll one served call into the daily usage aggregate.
+
+    ``credits`` is the credits actually deducted (free/subscriber paths) or
+    the credits that WOULD have been charged at list price (x402 path).
+    Zero-credit outcomes (e.g. unmetered traffic) are recorded as 0.
+    """
+    if plan_type not in PLAN_TYPES:
+        raise ValueError(f"unknown plan_type {plan_type!r}")
+    date = current_date_utc()
+    with _db_lock, _connect() as conn:
+        conn.execute(
+            "INSERT INTO usage_daily (date, tool, plan_type, calls, credits)"
+            " VALUES (?, ?, ?, 1, ?)"
+            " ON CONFLICT (date, tool, plan_type) DO UPDATE SET"
+            " calls = calls + 1, credits = credits + excluded.credits",
+            (date, tool, plan_type, credits),
+        )
+
+
+def get_usage_stats(days: int) -> dict:
+    """Per-day usage aggregates plus totals for the last ``days`` UTC days.
+
+    Shape: ``{"days": [{"date", "tools": {tool: {plan: {"calls",
+    "credits"}}}}], "totals": {"calls", "credits", "by_plan": {...}}}``.
+    Every requested day appears (empty ``tools`` when idle); every tool row
+    carries all three plan buckets, zero-filled.
+    """
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=days - 1)
+    with _db_lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT date, tool, plan_type, calls, credits FROM usage_daily"
+            " WHERE date >= ? AND date <= ?",
+            (start.isoformat(), end.isoformat()),
+        ).fetchall()
+    day_list = [(start + timedelta(days=i)).isoformat() for i in range(days)]
+    per_day: dict[str, dict] = {d: {} for d in day_list}
+    for date, tool, plan, calls, credits in rows:
+        if date not in per_day:
+            continue
+        bucket = per_day[date].setdefault(
+            tool, {p: {"calls": 0, "credits": 0.0} for p in PLAN_TYPES}
+        )
+        if plan in bucket:
+            bucket[plan]["calls"] += calls
+            bucket[plan]["credits"] = round(bucket[plan]["credits"] + credits, 1)
+    days_out = [{"date": d, "tools": per_day[d]} for d in day_list]
+    totals: dict = {
+        "calls": 0,
+        "credits": 0.0,
+        "by_plan": {p: {"calls": 0, "credits": 0.0} for p in PLAN_TYPES},
+    }
+    for day in per_day.values():
+        for plans in day.values():
+            for plan, values in plans.items():
+                totals["calls"] += values["calls"]
+                totals["credits"] = round(totals["credits"] + values["credits"], 1)
+                totals["by_plan"][plan]["calls"] += values["calls"]
+                totals["by_plan"][plan]["credits"] = round(
+                    totals["by_plan"][plan]["credits"] + values["credits"], 1
+                )
+    return {"days": days_out, "totals": totals}
 
 
 def _stripe() -> stripe:
