@@ -95,24 +95,72 @@ Rate limiting: 60 requests/minute per IP on conversion endpoints
 (override with `RATE_LIMIT`, e.g. `RATE_LIMIT="600/hour"`).
 `/health` is never rate-limited.
 
-## x402 metering (USDC on Base)
+## x402 metering (USDC on Base) — real verification
 
-Disabled by default. To enable:
+Disabled by default. When enabled, paid paths (`/convert/*`, `POST /mcp`
+tool calls) require an `X-Payment` header carrying a base64-encoded x402 v1
+payment payload with a signed EIP-3009 USDC authorization on Base. The server
+verifies with an x402 facilitator (`/verify`), serves the request, then
+settles (`/settle`). Missing/invalid payment gets a `402` with a
+`paymentRequirements` object (asset = Circle's canonical Base USDC
+`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA38bD`). `/health`, docs, `/billing/*`,
+and MCP discovery (`GET /mcp`, `initialize`, `tools/list`, `ping`) stay free.
 
 ```bash
 export X402_ENABLED=true
-export X402_PRICE_USDC="0.01"     # per-request price
-export X402_PAY_TO="0xYourAddress"
+export X402_PAY_TO="0xYourAddress"          # receives the USDC
+# X402_FACILITATOR_URL defaults to https://x402.org/facilitator
+#   (Base Sepolia TESTNET only — not mainnet)
 ```
 
-Paid paths (`/convert/*`, `POST /mcp/`) then require an `X-Payment` header
-with a signed payment payload; missing/invalid payment gets a `402` with
-payment instructions. `/health` and docs stay free.
+Facilitator auth: set `X402_FACILITATOR_API_KEY` (sent as `X-API-Key`), or
+`CDP_API_KEY_ID` + `CDP_API_KEY_SECRET` for the Coinbase CDP mainnet
+facilitator (`https://api.cdp.coinbase.com/platform/v2/x402`), which mints a
+CDP EdDSA JWT per request. Neither set = unauthenticated (works for the
+x402.org testnet facilitator).
 
-> **Stub warning:** the bundled verifier checks payload structure only —
-> it does **not** verify payments on-chain. Replace `verify_payment_stub`
-> with facilitator-backed EIP-3009 verification before production use.
-> The server logs a warning at startup while the stub is active.
+### Per-tool pricing (USDC)
+
+| Tool | Default price | Env override |
+|---|---|---|
+| `pdf_to_markdown` | $0.03 | `X402_PRICE_PDF_TO_MARKDOWN_USDC` |
+| `ocr_image` | $0.02 | `X402_PRICE_OCR_IMAGE_USDC` |
+| `parse_spreadsheet` | $0.02 | `X402_PRICE_PARSE_SPREADSHEET_USDC` |
+| `url_to_clean_text` | $0.01 | `X402_PRICE_URL_TO_CLEAN_TEXT_USDC` |
+| anything else | $0.015 | `X402_PRICE_USDC` |
+
+> **Pricing is a business decision — adjust before enabling.** Invalid or
+> non-positive price values fall back to the default (never zero).
+
+### Stripe monthly plans (subscriber bypass)
+
+Also off by default. A Stripe subscription issues a subscriber key that
+bypasses per-call x402 charges (send as `X-Subscriber-Key` header). Only the
+SHA-256 hash of each key is stored (SQLite, `BILLING_DB_PATH`, default
+`./data/subscribers.db`).
+
+```bash
+export STRIPE_ENABLED=true
+export STRIPE_SECRET_KEY="sk_live_..."        # from Stripe dashboard (server-side only)
+export STRIPE_WEBHOOK_SECRET="whsec_..."      # webhook signing secret
+export STRIPE_PRICE_ID="price_..."            # monthly plan price you create
+export STRIPE_SUCCESS_URL="https://your.app/billing/success"
+export STRIPE_CANCEL_URL="https://your.app/billing/cancel"
+```
+
+Endpoints: `POST /billing/checkout` → `{"checkout_url": ...}`;
+`POST /billing/stripe-webhook` (Stripe calls this);
+`GET /billing/key?session_id=...` → `{"subscriber_key": ...}` (shown once);
+`GET /billing/status` → `{"stripe_enabled": bool, "x402_enabled": bool}`.
+
+Safety rails: both systems require their full config or they stay **disabled**
+(fail closed) with an ERROR at startup. If x402 is live the server logs a
+warning naming real USDC charges. No secrets ever appear in code, logs, or
+error responses.
+
+> **Before enabling on mainnet:** form the AZ LLC, point
+> `X402_FACILITATOR_URL` at the CDP facilitator with CDP keys, and smoke-test
+> the CDP JWT claim set against the live facilitator.
 
 ## Development
 

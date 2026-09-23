@@ -18,10 +18,16 @@ from slowapi.util import get_remote_address
 from starlette.routing import Route
 
 from . import __version__
+from .billing import (
+    create_checkout_session,
+    handle_stripe_webhook,
+    issue_key_for_session,
+    stripe_effective_enabled,
+)
 from .converters import ConversionError, ocr_image, parse_spreadsheet, pdf_to_markdown
 from .converters import url_to_clean_text as _url_to_clean_text
 from .mcp_server import mcp
-from .x402 import X402PaymentMiddleware, warn_if_stub_enabled
+from .x402 import X402PaymentMiddleware, warn_if_payments_misconfigured, x402_effective_enabled
 
 log = logging.getLogger("doc_convert_mcp")
 
@@ -70,7 +76,7 @@ def create_app(rate_limit: str | None = None) -> FastAPI:
     )
 
     # x402 metering (env-gated, OFF by default) runs outermost.
-    warn_if_stub_enabled()
+    warn_if_payments_misconfigured()
     app.add_middleware(X402PaymentMiddleware)
 
     limiter = Limiter(key_func=get_remote_address)
@@ -98,7 +104,8 @@ def create_app(rate_limit: str | None = None) -> FastAPI:
         return {
             "status": "ok",
             "version": __version__,
-            "x402": os.environ.get("X402_ENABLED", "false"),
+            "x402": "enabled" if x402_effective_enabled() else "disabled",
+            "stripe": "enabled" if stripe_effective_enabled() else "disabled",
         }
 
     @app.post("/convert/pdf")
@@ -123,6 +130,64 @@ def create_app(rate_limit: str | None = None) -> FastAPI:
     @limiter.limit(limit)
     async def convert_url(request: Request, body: UrlRequest):  # noqa: ANN001, ANN202
         return {"text": _url_to_clean_text(body.url)}
+
+    # --- Stripe billing (env-gated, OFF by default; exempt from x402) --------
+    @app.post("/billing/checkout")
+    @limiter.limit(limit)
+    async def billing_checkout(request: Request):  # noqa: ANN001, ANN202
+        if not stripe_effective_enabled():
+            return JSONResponse(status_code=404, content={"error": "not_found"})
+        if (
+            not os.environ.get("STRIPE_SUCCESS_URL", "").strip()
+            or not os.environ.get("STRIPE_CANCEL_URL", "").strip()
+        ):
+            log.error("STRIPE_SUCCESS_URL/CANCEL_URL not configured — checkout unavailable.")
+            return JSONResponse(
+                status_code=503,
+                content={"error": "billing_not_configured"},
+            )
+        try:
+            url = create_checkout_session()
+        except Exception:  # noqa: BLE001 — Stripe API failure fails closed
+            log.exception("Stripe checkout session creation failed")
+            return JSONResponse(status_code=503, content={"error": "billing_unavailable"})
+        return {"checkout_url": url}
+
+    @app.post("/billing/stripe-webhook")
+    async def stripe_webhook(request: Request):  # noqa: ANN001, ANN202
+        if not stripe_effective_enabled():
+            return JSONResponse(status_code=404, content={"error": "not_found"})
+        payload = await request.body()
+        try:
+            result = handle_stripe_webhook(payload, request.headers.get("stripe-signature"))
+        except Exception:  # noqa: BLE001 — bad signature or malformed event
+            return JSONResponse(status_code=400, content={"error": "invalid_signature"})
+        return result
+
+    @app.get("/billing/key")
+    @limiter.limit(limit)
+    async def billing_key(request: Request, session_id: str = ""):  # noqa: ANN001, ANN202
+        if not stripe_effective_enabled():
+            return JSONResponse(status_code=404, content={"error": "not_found"})
+        if not session_id:
+            return JSONResponse(status_code=400, content={"error": "missing_session_id"})
+        try:
+            key = issue_key_for_session(session_id)
+        except LookupError as exc:
+            return JSONResponse(
+                status_code=404, content={"error": "session_not_found", "message": str(exc)}
+            )
+        except Exception:  # noqa: BLE001 — Stripe API failure fails closed
+            log.exception("Subscriber key issuance failed")
+            return JSONResponse(status_code=503, content={"error": "billing_unavailable"})
+        return {"subscriber_key": key}
+
+    @app.get("/billing/status")
+    async def billing_status():
+        return {
+            "stripe_enabled": stripe_effective_enabled(),
+            "x402_enabled": x402_effective_enabled(),
+        }
 
     # MCP over streamable HTTP, mounted at /mcp (stateless: safe to mount).
     app.mount("/mcp", mcp_asgi)
