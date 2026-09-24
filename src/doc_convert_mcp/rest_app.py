@@ -33,7 +33,12 @@ from .converters import ConversionError, ocr_image, parse_spreadsheet, pdf_to_ma
 from .converters import url_to_clean_text as _url_to_clean_text
 from .legal_docs import PRIVACY_POLICY, REFUND_POLICY, TERMS_OF_SERVICE
 from .mcp_server import mcp
-from .x402 import X402PaymentMiddleware, warn_if_payments_misconfigured, x402_effective_enabled
+from .x402 import (
+    X402PaymentMiddleware,
+    build_discovery_manifest,
+    warn_if_payments_misconfigured,
+    x402_effective_enabled,
+)
 
 log = logging.getLogger("doc_convert_mcp")
 
@@ -128,6 +133,15 @@ def create_app(rate_limit: str | None = None) -> FastAPI:
     @app.get("/legal/refunds", include_in_schema=False)
     async def legal_refunds():
         return Response(content=REFUND_POLICY, media_type="text/markdown; charset=utf-8")
+
+    # --- x402 discovery manifest: public, always free ------------------------
+    # No @limiter.limit: informational endpoints should never 429. It is also
+    # exempt from the x402 middleware (EXEMPT_PREFIXES covers /.well-known),
+    # so it can never 402, never cost subscriber credits, and never consume
+    # free-tier credits — clients must be able to discover pricing for free.
+    @app.get("/.well-known/x402.json", include_in_schema=False)
+    async def x402_discovery_manifest():
+        return JSONResponse(build_discovery_manifest())
 
     @app.post("/convert/pdf")
     @limiter.limit(limit)
