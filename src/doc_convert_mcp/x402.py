@@ -62,7 +62,7 @@ FACILITATOR_TIMEOUT = 15.0
 DEFAULT_FACILITATOR_URL = "https://x402.org/facilitator"
 
 # Paths that never require payment (health checks, docs, billing endpoints,
-# legal documents).
+# legal documents, and the public x402 discovery manifest).
 EXEMPT_PREFIXES = (
     "/health",
     "/docs",
@@ -71,6 +71,7 @@ EXEMPT_PREFIXES = (
     "/favicon.ico",
     "/billing",
     "/legal",
+    "/.well-known",
 )
 
 # JSON-RPC methods that are discovery, not paid tool calls.
@@ -154,6 +155,65 @@ def tool_price_usdc(tool_name: str | None) -> Decimal:
 
 def usdc_to_atomic_units(price: Decimal) -> int:
     return int((price * (10**USDC_DECIMALS)).to_integral_value(rounding="ROUND_DOWN"))
+
+
+# --- Discovery manifest -------------------------------------------------------
+#: Machine-readable statuses for GET /.well-known/x402.json. The manifest is
+#: honest by construction: it reports "implemented_but_disabled" unless x402
+#: is actually configured and effective (X402_ENABLED + X402_PAY_TO +
+#: X402_FACILITATOR_URL), and NEVER claims live/accepting payments when the
+#: middleware would serve requests without charging.
+X402_STATUS_ENABLED = "enabled"
+X402_STATUS_DISABLED = "implemented_but_disabled"
+
+
+def build_discovery_manifest() -> dict:
+    """Build the public x402 discovery manifest (GET /.well-known/x402.json).
+
+    Every price in the manifest is derived from the single source of truth —
+    ``TOOL_PRICES_USDC`` via ``tool_price_usdc`` (which honors the
+    ``X402_PRICE_<TOOL>_USDC`` env overrides) — never a duplicated table.
+    ``pay_to`` is null unless ``X402_PAY_TO`` is actually set; the recipient
+    address is never invented.
+    """
+    enabled = x402_effective_enabled()
+    tools: dict[str, dict] = {}
+    for tool_name in TOOL_PRICES_USDC:
+        price = tool_price_usdc(tool_name)
+        tools[tool_name] = {
+            "price_usdc": str(price),
+            "atomic_units": usdc_to_atomic_units(price),
+        }
+    return {
+        "x402_status": X402_STATUS_ENABLED if enabled else X402_STATUS_DISABLED,
+        "enabled": enabled,
+        "note": (
+            "x402 payments are implemented but go live only after business "
+            "entity setup (Arizona LLC); currently disabled. Not accepting "
+            "payments at this time. All endpoints are served without charge "
+            "until then."
+        ),
+        "scheme": SCHEME,
+        "network": NETWORK,
+        "x402_version": X402_VERSION,
+        "asset": USDC_BASE_CONTRACT,
+        "asset_decimals": USDC_DECIMALS,
+        "default_facilitator": DEFAULT_FACILITATOR_URL,
+        "facilitator_note": (
+            "Default facilitator covers Base Sepolia (testnet) only; "
+            "Base mainnet uses X402_FACILITATOR_URL."
+        ),
+        "pay_to": x402_pay_to() or None,
+        "prices_usdc": {tool: str(tool_price_usdc(tool)) for tool in TOOL_PRICES_USDC},
+        "default_price_usdc": str(x402_price_usdc()),
+        "tools": tools,
+        "rest_routes": dict(REST_TOOL_PRICES),
+        "legal": {
+            "terms": "/legal/terms",
+            "privacy": "/legal/privacy",
+            "refunds": "/legal/refunds",
+        },
+    }
 
 
 # --- Subscriber credits ------------------------------------------------------
