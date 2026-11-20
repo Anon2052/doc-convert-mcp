@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import shutil
-import urllib.parse
 
 import pytest
 from openpyxl import Workbook
@@ -181,9 +180,18 @@ class _FakeResp:
 
 
 def _patch_get(monkeypatch, resp):
-    # Neutralize DNS/SSRF validation (no network in unit tests) and fake the fetch.
-    monkeypatch.setattr(converters, "_validate_url", lambda url: urllib.parse.urlparse(url))
-    monkeypatch.setattr(converters.httpx, "get", lambda *a, **k: resp)
+    # Neutralize the network fetch (H-1/H-2/H-3: no sockets in unit tests)
+    # by stubbing _fetch_guarded; SSRF validation is exercised separately.
+    def _fake_fetch(url, timeout=20):
+        return converters._FetchResult(
+            url,
+            {"content-type": resp.headers["content-type"]},
+            resp.status_code,
+            resp.content,
+            resp.encoding,
+        )
+
+    monkeypatch.setattr(converters, "_fetch_guarded", _fake_fetch)
 
 
 def test_url_to_clean_text_basic(monkeypatch):

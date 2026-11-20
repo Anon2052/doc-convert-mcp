@@ -12,6 +12,11 @@ from doc_convert_mcp.mcp_server import mcp
 from tests.test_converters import make_pdf_bytes  # noqa: F401
 
 
+@pytest.fixture(autouse=True)
+def _isolated_billing_db(monkeypatch, tmp_path):
+    """M-1: the replay table is persistent — point every test at a scratch
+    DB so claims can never leak between tests (or touch the real path)."""
+    monkeypatch.setenv("BILLING_DB_PATH", str(tmp_path / "billing.db"))
 def _run(coro):
     return asyncio.run(coro)
 
@@ -33,6 +38,32 @@ def test_tool_descriptions_present():
 
     for tool in _run(go()):
         assert tool.description, f"tool {tool.name} has no description"
+
+
+def test_tool_titles_and_annotations():
+    """Claude directory readiness: every tool exposes a human title plus
+    readOnly/destructive/idempotent/openWorld annotation hints."""
+    async def go():
+        async with Client(mcp) as client:
+            return await client.list_tools()
+
+    tools = {t.name: t for t in _run(go())}
+    expected = {
+        "pdf_to_markdown": ("Convert PDF to Markdown", False),
+        "ocr_image": ("OCR Image to Text", False),
+        "parse_spreadsheet": ("Parse Spreadsheet to Markdown", False),
+        "url_to_clean_text": ("Fetch URL as Clean Text", True),
+    }
+    assert set(tools) == set(expected)
+    for name, (title, open_world) in expected.items():
+        tool = tools[name]
+        assert tool.title == title, f"{name} title"
+        ann = tool.annotations
+        assert ann is not None, f"{name} missing annotations"
+        assert ann.read_only_hint is True, f"{name} readOnlyHint"
+        assert ann.destructive_hint is False, f"{name} destructiveHint"
+        assert ann.idempotent_hint is True, f"{name} idempotentHint"
+        assert ann.open_world_hint is open_world, f"{name} openWorldHint"
 
 
 def test_mcp_pdf_to_markdown_roundtrip():

@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from doc_convert_mcp import billing, x402
 from doc_convert_mcp.rest_app import create_app
 from doc_convert_mcp.x402 import (
-    USDC_BASE_CONTRACT,
+    USDC_BASE_ADDRESS,
     FacilitatorClient,
     build_payment_requirements,
     check_payment_sanity,
@@ -25,6 +25,14 @@ from doc_convert_mcp.x402 import (
     x402_effective_enabled,
 )
 from tests.test_converters import make_pdf_bytes  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+def _isolated_billing_db(monkeypatch, tmp_path):
+    """M-1: the replay table is persistent — point every test at a scratch
+    DB so claims can never leak between tests (or touch the real path)."""
+    monkeypatch.setenv("BILLING_DB_PATH", str(tmp_path / "billing.db"))
+
 
 PAY_TO = "0xAbC1230000000000000000000000000000000001"
 
@@ -55,9 +63,9 @@ def _auth(**over):
     auth = {
         "from": "0xPayer000000000000000000000000000000000002",
         "to": PAY_TO,
-        "value": "30000",  # 0.03 USDC in atomic units
+        "value": "8000",  # 0.008 USDC in atomic units
         "validAfter": str(now - 60),
-        "validBefore": str(now + 300),
+        "validBefore": str(now + 240),
         "nonce": "0x" + "ab" * 32,
     }
     auth.update(over)
@@ -135,8 +143,8 @@ def test_enabled_but_incomplete_config_stays_disabled(monkeypatch, caplog):
 
 # ------------------------------------------------------------- 402 challenge shape
 def test_402_challenge_shape(monkeypatch):
-    _enable_x402(monkeypatch)
-    monkeypatch.setenv("FREE_TIER_ENABLED", "0")  # test the x402 path, not the free bucket
+    # Free tier off: this test reads the raw 402 challenge.
+    _enable_x402(monkeypatch, FREE_TIER_ENABLED="false")
     client = TestClient(create_app())
     r = client.post(
         "/convert/pdf", files={"file": ("t.pdf", make_pdf_bytes("Hi"), "application/pdf")}
@@ -147,17 +155,16 @@ def test_402_challenge_shape(monkeypatch):
     assert body["accepts"]["scheme"] == "exact"
     assert "STUB" not in json.dumps(body)
     reqs = body["paymentRequirements"]
-    assert reqs["asset"] == USDC_BASE_CONTRACT
+    assert reqs["asset"] == USDC_BASE_ADDRESS
     assert reqs["network"] == "base"
     assert reqs["scheme"] == "exact"
     assert reqs["payTo"] == PAY_TO
-    # pdf_to_markdown default $0.03 -> 30000 atomic units
-    assert reqs["maxAmountRequired"] == "30000"
+    # pdf_to_markdown default $0.008 -> 8000 atomic units
+    assert reqs["maxAmountRequired"] == "8000"
 
 
 def test_per_tool_pricing_and_env_override(monkeypatch):
-    _enable_x402(monkeypatch, X402_PRICE_OCR_IMAGE_USDC="0.05")
-    monkeypatch.setenv("FREE_TIER_ENABLED", "0")  # test the x402 path, not the free bucket
+    _enable_x402(monkeypatch, X402_PRICE_OCR_IMAGE_USDC="0.05", FREE_TIER_ENABLED="false")
     client = TestClient(create_app())
     r = client.post("/convert/ocr", files={"file": ("t.png", b"x", "image/png")})
     assert r.status_code == 402
@@ -166,25 +173,24 @@ def test_per_tool_pricing_and_env_override(monkeypatch):
     r = client.post(
         "/convert/pdf", files={"file": ("t.pdf", make_pdf_bytes("Hi"), "application/pdf")}
     )
-    assert r.json()["paymentRequirements"]["maxAmountRequired"] == "30000"
+    assert r.json()["paymentRequirements"]["maxAmountRequired"] == "8000"
     r = client.post("/convert/url", json={"url": "https://example.com/"})
-    assert r.json()["paymentRequirements"]["maxAmountRequired"] == "10000"
+    assert r.json()["paymentRequirements"]["maxAmountRequired"] == "8000"
 
 
 def test_invalid_price_env_falls_back_to_default(monkeypatch):
-    _enable_x402(monkeypatch, X402_PRICE_OCR_IMAGE_USDC="bogus")
-    monkeypatch.setenv("FREE_TIER_ENABLED", "0")  # test the x402 path, not the free bucket
+    _enable_x402(monkeypatch, X402_PRICE_OCR_IMAGE_USDC="bogus", FREE_TIER_ENABLED="false")
     client = TestClient(create_app())
     r = client.post("/convert/ocr", files={"file": ("t.png", b"x", "image/png")})
     assert r.status_code == 402
-    # ocr_image code default $0.02 -> 20000, never zero
-    assert r.json()["paymentRequirements"]["maxAmountRequired"] == "20000"
+    # ocr_image code default $0.008 -> 8000, never zero
+    assert r.json()["paymentRequirements"]["maxAmountRequired"] == "8000"
 
 
 def test_generic_default_price(monkeypatch):
     _enable_x402(monkeypatch)
     assert tool_price_usdc("no_such_tool") == x402.tool_price_usdc(None)
-    assert usdc_to_atomic_units(tool_price_usdc(None)) == 15000
+    assert usdc_to_atomic_units(tool_price_usdc(None)) == 8000
 
 
 # ------------------------------------------------------------- MCP discovery exemption
@@ -197,8 +203,10 @@ def test_mcp_discovery_methods_exempt(monkeypatch):
 
 
 def test_mcp_tools_call_requires_payment(monkeypatch):
-    _enable_x402(monkeypatch)
-    monkeypatch.setenv("FREE_TIER_ENABLED", "0")  # test the x402 path, not the free bucket
+    # Free tier off: with it on, the first anonymous calls are served from
+    # the bucket (see test_free_tier.py); this test exercises the raw
+    # payment-required path.
+    _enable_x402(monkeypatch, FREE_TIER_ENABLED="false")
     client = TestClient(create_app())
     r = client.post(
         "/mcp",
@@ -210,12 +218,11 @@ def test_mcp_tools_call_requires_payment(monkeypatch):
         },
     )
     assert r.status_code == 402
-    assert r.json()["paymentRequirements"]["maxAmountRequired"] == "20000"
+    assert r.json()["paymentRequirements"]["maxAmountRequired"] == "8000"
 
 
 def test_mcp_unparseable_body_gets_default_price_not_500(monkeypatch):
-    _enable_x402(monkeypatch)
-    monkeypatch.setenv("FREE_TIER_ENABLED", "0")  # test the x402 path, not the free bucket
+    _enable_x402(monkeypatch, FREE_TIER_ENABLED="false")
     client = TestClient(create_app())
     r = client.post("/mcp", content=b"not json", headers={"Content-Type": "application/json"})
     assert r.status_code == 402  # default price, not a 500
@@ -234,7 +241,7 @@ def test_decode_x_payment_malformed():
     assert decode_x_payment(base64.b64encode(b"[1,2]").decode()) is None
 
 
-def _requirements(price="0.03"):
+def _requirements(price="0.008"):
     from decimal import Decimal
 
     return build_payment_requirements(Decimal(price), "http://t/", "test")
@@ -282,6 +289,48 @@ def test_sanity_accepts_well_formed(monkeypatch):
     assert check_payment_sanity(payload, _requirements()) is None
 
 
+def test_402_canonical_shape(monkeypatch):
+    """The 402 body uses the canonical cross-repo shape: error/message/
+    accepts/paymentRequirements, with reason present on rejections."""
+    _enable_x402(monkeypatch, FREE_TIER_ENABLED="false")
+    client = TestClient(create_app())
+    files = {"file": ("t.pdf", make_pdf_bytes("Hi"), "application/pdf")}
+
+    # Bare challenge: no reason key when there is no rejection detail.
+    r = client.post("/convert/pdf", files=files)
+    assert r.status_code == 402
+    body = r.json()
+    assert body["error"] == "payment_required"
+    assert "x402 USDC micropayment" in body["message"]
+    assert "reason" not in body
+    assert body["accepts"] == {
+        "asset": "USDC",
+        "asset_contract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "network": "base",
+        "amount_usdc": "0.008",
+        "amount_atomic": "8000",
+        "pay_to": PAY_TO,
+        "scheme": "exact",
+    }
+    assert body["paymentRequirements"]["maxAmountRequired"] == "8000"
+
+    # Malformed X-Payment: rejection carries a reason.
+    r = client.post("/convert/pdf", files=files, headers={"X-Payment": "not-valid!!!"})
+    assert r.status_code == 402
+    body = r.json()
+    assert body["error"] == "payment_required"
+    assert body["reason"] == "X-Payment header is not valid base64-encoded JSON"
+    assert "paymentRequirements" in body
+
+    # Failed sanity check: rejection carries the specific reason.
+    r = client.post("/convert/pdf", files=files, headers=_payment_header(to="0xWrong"))
+    assert r.status_code == 402
+    body = r.json()
+    assert body["error"] == "payment_required"
+    assert body["reason"] == "bad recipient"
+    assert "paymentRequirements" in body
+
+
 # ------------------------------------------------------------- facilitator verify/settle
 def test_verify_false_gives_402_payment_invalid(monkeypatch, fake_facilitator):
     _enable_x402(monkeypatch)
@@ -295,7 +344,7 @@ def test_verify_false_gives_402_payment_invalid(monkeypatch, fake_facilitator):
     assert r.status_code == 402
     body = r.json()
     assert body["error"] == "payment_invalid"
-    assert body["invalidReason"] == "bad signature"
+    assert body["reason"] == "bad signature"
 
 
 def test_verify_true_serves_and_settles(monkeypatch, fake_facilitator):
@@ -483,15 +532,23 @@ def test_health_reports_payment_state(monkeypatch, tmp_path):
 
 def test_webhook_completed_creates_subscriber(monkeypatch, tmp_path):
     _enable_stripe(monkeypatch, tmp_path)
-    event = {
-        "type": "checkout.session.completed",
-        "data": {
-            "object": {
-                "customer": "cus_123",
-                "customer_details": {"email": "buyer@example.com"},
-            }
+    # Use a real stripe Event (not a dict): stripe-python v12+ resources have
+    # no .get(), and a dict fixture masked that bug (every webhook 400'd).
+    event = billing.stripe.Event.construct_from(
+        {
+            "id": "evt_test_completed",
+            "type": "checkout.session.completed",
+            "data": {
+                "object": {
+                    "id": "cs_test_123",
+                    "mode": "subscription",
+                    "customer": "cus_123",
+                    "customer_details": {"email": "buyer@example.com"},
+                }
+            },
         },
-    }
+        "sk_test_123",
+    )
     monkeypatch.setattr(
         billing.stripe.Webhook, "construct_event", lambda payload, sig, secret: event
     )
@@ -534,10 +591,14 @@ def test_webhook_subscription_deleted_deactivates(monkeypatch, tmp_path):
     _enable_stripe(monkeypatch, tmp_path)
     raw = billing.create_subscriber("cus_7", "a@b.c")
     assert billing.subscriber_key_valid(raw)
-    event = {
-        "type": "customer.subscription.deleted",
-        "data": {"object": {"customer": "cus_7"}},
-    }
+    event = billing.stripe.Event.construct_from(
+        {
+            "id": "evt_test_deleted",
+            "type": "customer.subscription.deleted",
+            "data": {"object": {"customer": "cus_7"}},
+        },
+        "sk_test_123",
+    )
     monkeypatch.setattr(
         billing.stripe.Webhook, "construct_event", lambda payload, sig, secret: event
     )
@@ -549,10 +610,14 @@ def test_webhook_subscription_deleted_deactivates(monkeypatch, tmp_path):
 def test_webhook_subscription_updated_syncs_status(monkeypatch, tmp_path):
     _enable_stripe(monkeypatch, tmp_path)
     billing.create_subscriber("cus_8", "a@b.c")
-    event = {
-        "type": "customer.subscription.updated",
-        "data": {"object": {"customer": "cus_8", "status": "past_due"}},
-    }
+    event = billing.stripe.Event.construct_from(
+        {
+            "id": "evt_test_updated",
+            "type": "customer.subscription.updated",
+            "data": {"object": {"customer": "cus_8", "status": "past_due"}},
+        },
+        "sk_test_123",
+    )
     monkeypatch.setattr(
         billing.stripe.Webhook, "construct_event", lambda payload, sig, secret: event
     )
@@ -564,7 +629,6 @@ def test_webhook_subscription_updated_syncs_status(monkeypatch, tmp_path):
 
 def test_subscriber_key_bypasses_x402(monkeypatch, tmp_path, fake_facilitator):
     _enable_x402(monkeypatch)
-    monkeypatch.setenv("FREE_TIER_ENABLED", "0")  # test the x402 path, not the free bucket
     _enable_stripe(monkeypatch, tmp_path)
     raw = billing.create_subscriber("cus_bypass", "a@b.c")
     client = TestClient(create_app())
@@ -576,7 +640,10 @@ def test_subscriber_key_bypasses_x402(monkeypatch, tmp_path, fake_facilitator):
     assert r.status_code == 200, r.text
     assert "Sub" in r.json()["markdown"]
     assert fake_facilitator.verify_calls == 0  # no facilitator call needed
-    # bad key falls through to the normal 402 flow
+    # bad key falls through to the normal 402 flow (free tier off here —
+    # with it on, the fall-through lands in the free bucket first; see
+    # test_free_tier.py)
+    monkeypatch.setenv("FREE_TIER_ENABLED", "false")
     r = client.post(
         "/convert/pdf",
         files={"file": ("t.pdf", make_pdf_bytes("Hi"), "application/pdf")},
@@ -587,12 +654,23 @@ def test_subscriber_key_bypasses_x402(monkeypatch, tmp_path, fake_facilitator):
 
 def test_billing_key_issues_token_for_paid_session(monkeypatch, tmp_path):
     _enable_stripe(monkeypatch, tmp_path)
-    session = {
-        "payment_status": "paid",
-        "customer": "cus_key",
-        "customer_details": {"email": "k@example.com"},
-    }
-    monkeypatch.setattr(billing.stripe.checkout.Session, "retrieve", lambda session_id: session)
+    # Real stripe Session: Session.retrieve returns a resource, not a dict.
+    session = billing.stripe.checkout.Session.construct_from(
+        {
+            "id": "cs_test_123",
+            "mode": "subscription",
+            "status": "complete",
+            "payment_status": "paid",
+            "customer": "cus_key",
+            "customer_details": {"email": "k@example.com"},
+            # M-2: the session must carry a line item for the configured price.
+            "line_items": {"data": [{"price": {"id": "price_fixture"}}]},
+        },
+        "sk_test_123",
+    )
+    monkeypatch.setattr(
+        billing.stripe.checkout.Session, "retrieve", lambda session_id, expand=None: session
+    )
     r = TestClient(create_app()).get("/billing/key?session_id=cs_test_123")
     assert r.status_code == 200, r.text
     token = r.json()["subscriber_key"]
@@ -604,7 +682,10 @@ def test_billing_key_rejects_unpaid_session(monkeypatch, tmp_path):
     monkeypatch.setattr(
         billing.stripe.checkout.Session,
         "retrieve",
-        lambda session_id: {"payment_status": "open", "customer": "cus_x"},
+        lambda session_id, expand=None: billing.stripe.checkout.Session.construct_from(
+            {"id": "cs_test_123", "payment_status": "open", "customer": "cus_x"},
+            "sk_test_123",
+        ),
     )
     r = TestClient(create_app()).get("/billing/key?session_id=cs_test_123")
     assert r.status_code == 404

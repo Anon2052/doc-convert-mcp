@@ -30,6 +30,11 @@ from tests.test_payments import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolated_billing_db(monkeypatch, tmp_path):
+    """M-1: the replay table is persistent — point every test at a scratch
+    DB so claims can never leak between tests (or touch the real path)."""
+    monkeypatch.setenv("BILLING_DB_PATH", str(tmp_path / "billing.db"))
 # ------------------------------------------------------------- helpers
 def _pdf_post(client, **kwargs):
     return client.post(
@@ -69,10 +74,11 @@ def fake_facilitator(monkeypatch):
 @pytest.mark.parametrize(
     ("price", "expected"),
     [
-        (Decimal("0.03"), 3.0),  # pdf_to_markdown
-        (Decimal("0.02"), 2.0),  # ocr_image / parse_spreadsheet
-        (Decimal("0.01"), 1.0),  # url_to_clean_text
-        (Decimal("0.015"), 1.5),  # x402 default fallback price
+        (Decimal("0.03"), 3.0),
+        (Decimal("0.02"), 2.0),
+        (Decimal("0.01"), 1.0),
+        (Decimal("0.008"), 0.8),  # current uniform tool price
+        (Decimal("0.015"), 1.5),
     ],
 )
 def test_credits_for_price(price, expected):
@@ -90,8 +96,8 @@ def test_subscriber_under_cap_gets_200_and_is_charged_credits(monkeypatch, tmp_p
     rows = _usage_rows(tmp_path)
     assert len(rows) == 1
     assert rows[0][1] == billing.current_month_utc()  # month column
-    # pdf_to_markdown lists at $0.03 -> 3.0 credits deducted (not 1 "call")
-    assert rows[0][2] == pytest.approx(3.0)
+    # pdf_to_markdown lists at $0.008 -> 0.8 credits deducted (not 1 "call")
+    assert rows[0][2] == pytest.approx(0.8)
 
 
 def test_mixed_tool_costs_deduct_fractional_credits(monkeypatch, tmp_path):
@@ -102,15 +108,15 @@ def test_mixed_tool_costs_deduct_fractional_credits(monkeypatch, tmp_path):
     raw = billing.create_subscriber("cus_cap_mix", "a@b.c")
     client = TestClient(create_app())
     headers = {"X-Subscriber-Key": raw}
-    assert _pdf_post(client, headers=headers).status_code == 200  # $0.03 -> 3.0
+    assert _pdf_post(client, headers=headers).status_code == 200  # $0.008 -> 0.8
     r = client.post(
         "/convert/spreadsheet",
         files={"file": ("a.csv", b"x,y\n1,2\n", "text/csv")},
         headers=headers,
     )
-    assert r.status_code == 200, r.text  # $0.02 -> 2.0
+    assert r.status_code == 200, r.text  # $0.008 -> 0.8
     (credits,) = _usage_rows(tmp_path)[0][2:3]
-    assert credits == pytest.approx(5.0)
+    assert credits == pytest.approx(1.6)
 
 
 def test_subscriber_over_cap_gets_actionable_429(monkeypatch, tmp_path):
@@ -120,13 +126,14 @@ def test_subscriber_over_cap_gets_actionable_429(monkeypatch, tmp_path):
     raw = billing.create_subscriber("cus_cap2", "a@b.c")
     client = TestClient(create_app())
     headers = {"X-Subscriber-Key": raw}
-    assert _pdf_post(client, headers=headers).status_code == 200  # 3.0 credits
-    r = _pdf_post(client, headers=headers)  # 6.0 > 5 -> 429
+    for _ in range(6):  # 6 x 0.8 = 4.8 <= 5
+        assert _pdf_post(client, headers=headers).status_code == 200
+    r = _pdf_post(client, headers=headers)  # 5.6 > 5 -> 429
     assert r.status_code == 429, r.text
     body = r.json()
     month = billing.current_month_utc()
     assert body["error"] == "subscriber_monthly_cap_exceeded"
-    assert body["credits_used"] == pytest.approx(6.0)
+    assert body["credits_used"] == pytest.approx(5.6)
     assert body["credit_limit"] == pytest.approx(5.0)
     assert body["period"] == month
     assert body["resets_at"] == billing.month_reset_iso(month)
@@ -144,9 +151,10 @@ def test_cap_covers_mcp_tool_calls(monkeypatch, tmp_path):
     raw = billing.create_subscriber("cus_cap_mcp", "a@b.c")
     headers = {"X-Subscriber-Key": raw}
     with TestClient(create_app()) as client:  # lifespan: FastMCP session manager
-        r = _mcp_tool_call(client, headers=headers)
-        assert r.status_code == 200, r.text[:400]  # 3.0 credits
-        r = _mcp_tool_call(client, headers=headers)  # 6.0 > 5 -> 429
+        for _ in range(6):  # 6 x 0.8 = 4.8 <= 5
+            r = _mcp_tool_call(client, headers=headers)
+            assert r.status_code == 200, r.text[:400]
+        r = _mcp_tool_call(client, headers=headers)  # 5.6 > 5 -> 429
         assert r.status_code == 429, r.text[:400]
         assert r.json()["error"] == "subscriber_monthly_cap_exceeded"
 
@@ -159,8 +167,9 @@ def test_month_rollover_resets_counter(monkeypatch, tmp_path):
     client = TestClient(create_app())
     headers = {"X-Subscriber-Key": raw}
     first_month = billing.current_month_utc()
-    assert _pdf_post(client, headers=headers).status_code == 200  # 3.0
-    assert _pdf_post(client, headers=headers).status_code == 429  # 6.0 > 5
+    for _ in range(6):  # 6 x 0.8 = 4.8 <= 5
+        assert _pdf_post(client, headers=headers).status_code == 200
+    assert _pdf_post(client, headers=headers).status_code == 429  # 5.6 > 5
     # patch the current month: the old month's credits no longer apply
     monkeypatch.setattr(billing, "current_month_utc", lambda: "2099-02")
     assert _pdf_post(client, headers=headers).status_code == 200
@@ -174,7 +183,8 @@ def test_x402_per_call_payers_are_never_capped(monkeypatch, tmp_path, fake_facil
     monkeypatch.setenv("SUBSCRIBER_MONTHLY_CREDIT_LIMIT", "1")
     raw = billing.create_subscriber("cus_cap_payer", "a@b.c")
     client = TestClient(create_app())
-    # blow the subscriber cap first (3.0 > 1)
+    # blow the subscriber cap first (2 x 0.8 = 1.6 > 1)
+    assert _pdf_post(client, headers={"X-Subscriber-Key": raw}).status_code == 200
     assert _pdf_post(client, headers={"X-Subscriber-Key": raw}).status_code == 429
     # a per-call payer (no subscriber key, valid x402 payment) still works
     r = _pdf_post(client, headers=_payment_header())
@@ -184,33 +194,13 @@ def test_x402_per_call_payers_are_never_capped(monkeypatch, tmp_path, fake_facil
     assert len(_usage_rows(tmp_path)) == 1
 
 
-def test_invalid_key_falls_through_to_free_tier_not_subscriber_cap(
-    monkeypatch, tmp_path, fake_facilitator
-):
-    """A bogus subscriber key is not a *valid* key, so the middleware order
-    (valid key -> subscriber path; x402-paid -> exempt; else free bucket)
-    serves it from the anonymous free tier — never from the subscriber cap,
-    and never counted against subscriber usage."""
+def test_invalid_key_is_not_counted_and_still_402(monkeypatch, tmp_path, fake_facilitator):
     _enable_x402(monkeypatch)
     _enable_stripe(monkeypatch, tmp_path)
+    # Free tier off: with it on, an invalid key lands in the anonymous
+    # free bucket instead of the 402 flow (see test_free_tier.py).
+    monkeypatch.setenv("FREE_TIER_ENABLED", "false")
     monkeypatch.setenv("SUBSCRIBER_MONTHLY_CREDIT_LIMIT", "1")
-    r = _pdf_post(
-        TestClient(create_app()),
-        headers={"X-Subscriber-Key": "bogus", "X-Forwarded-For": "9.9.9.9"},
-    )
-    assert r.status_code == 200, r.text  # free tier, not 402
-    assert _usage_rows(tmp_path) == []  # subscriber usage untouched
-    conn = sqlite3.connect(str(tmp_path / "subscribers.db"))
-    free_rows = conn.execute("SELECT credits FROM free_usage").fetchall()
-    assert free_rows[0][0] == pytest.approx(3.0)  # deducted from the free bucket
-
-
-def test_invalid_key_still_402_when_free_tier_disabled(monkeypatch, tmp_path, fake_facilitator):
-    """FREE_TIER_ENABLED=0: the free path is skipped, so a bogus key with no
-    payment falls straight to the x402 402 challenge."""
-    _enable_x402(monkeypatch)
-    _enable_stripe(monkeypatch, tmp_path)
-    monkeypatch.setenv("FREE_TIER_ENABLED", "0")
     r = _pdf_post(TestClient(create_app()), headers={"X-Subscriber-Key": "bogus"})
     assert r.status_code == 402
     assert _usage_rows(tmp_path) == []
@@ -242,18 +232,18 @@ def test_billing_usage_returns_accurate_numbers(monkeypatch, tmp_path):
     raw = billing.create_subscriber("cus_usage1", "a@b.c")
     client = TestClient(create_app())
     headers = {"X-Subscriber-Key": raw}
-    assert _pdf_post(client, headers=headers).status_code == 200  # 3.0 credits
+    assert _pdf_post(client, headers=headers).status_code == 200  # 0.8 credits
     r = client.get("/billing/usage", headers=headers)
     assert r.status_code == 200, r.text
     body = r.json()
     month = billing.current_month_utc()
-    assert body["credits_used"] == pytest.approx(3.0)
+    assert body["credits_used"] == pytest.approx(0.8)
     assert body["credit_limit"] == pytest.approx(1000.0)
     assert body["period"] == month
     assert body["resets_at"] == billing.month_reset_iso(month)
     # reading usage never consumes credits
     r2 = client.get("/billing/usage", headers=headers)
-    assert r2.json()["credits_used"] == pytest.approx(3.0)
+    assert r2.json()["credits_used"] == pytest.approx(0.8)
 
 
 def test_billing_usage_is_free_when_capped(monkeypatch, tmp_path):
@@ -264,10 +254,11 @@ def test_billing_usage_is_free_when_capped(monkeypatch, tmp_path):
     raw = billing.create_subscriber("cus_usage2", "a@b.c")
     client = TestClient(create_app())
     headers = {"X-Subscriber-Key": raw}
-    assert _pdf_post(client, headers=headers).status_code == 429  # capped at 3.0 > 1
+    assert _pdf_post(client, headers=headers).status_code == 200  # 0.8 <= 1
+    assert _pdf_post(client, headers=headers).status_code == 429  # 1.6 > 1: capped
     r = client.get("/billing/usage", headers=headers)
     assert r.status_code == 200, r.text  # NOT 429
-    assert r.json()["credits_used"] == pytest.approx(3.0)
+    assert r.json()["credits_used"] == pytest.approx(1.6)
 
 
 def test_billing_usage_rejects_bad_key(monkeypatch, tmp_path):
