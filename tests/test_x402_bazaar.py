@@ -238,9 +238,7 @@ def test_challenge_without_resource_has_no_extensions():
 
 def test_free_tier_behavior_unchanged(monkeypatch):
     _enable(monkeypatch, FREE_TIER_ENABLED="true")
-    monkeypatch.setattr(
-        "doc_convert_mcp.rest_app._url_to_clean_text", lambda url: "clean text"
-    )
+    monkeypatch.setattr("doc_convert_mcp.rest_app._url_to_clean_text", lambda url: "clean text")
     xc = TestClient(create_app())
     resp = xc.post("/convert/url", json={"url": "https://example.com/article"})
     assert resp.status_code == 200

@@ -17,6 +17,8 @@ def _isolated_billing_db(monkeypatch, tmp_path):
     """M-1: the replay table is persistent — point every test at a scratch
     DB so claims can never leak between tests (or touch the real path)."""
     monkeypatch.setenv("BILLING_DB_PATH", str(tmp_path / "billing.db"))
+
+
 def _run(coro):
     return asyncio.run(coro)
 
@@ -43,6 +45,7 @@ def test_tool_descriptions_present():
 def test_tool_titles_and_annotations():
     """Claude directory readiness: every tool exposes a human title plus
     readOnly/destructive/idempotent/openWorld annotation hints."""
+
     async def go():
         async with Client(mcp) as client:
             return await client.list_tools()

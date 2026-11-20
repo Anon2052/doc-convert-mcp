@@ -147,17 +147,14 @@ def _guard_zip(data: bytes, label: str) -> None:
         raise ConversionError(f"{label}: unreadable workbook ({exc})") from exc
     entries = zf.infolist()
     if len(entries) > MAX_ZIP_ENTRIES:
-        raise ConversionError(
-            f"{label}: zip has {len(entries)} entries (max {MAX_ZIP_ENTRIES})"
-        )
+        raise ConversionError(f"{label}: zip has {len(entries)} entries (max {MAX_ZIP_ENTRIES})")
     total_uncompressed = 0
     for info in entries:
         size = info.file_size
         total_uncompressed += size
         if total_uncompressed > MAX_ZIP_UNCOMPRESSED_BYTES:
             raise ConversionError(
-                f"{label}: uncompressed zip contents exceed "
-                f"{MAX_ZIP_UNCOMPRESSED_BYTES} byte limit"
+                f"{label}: uncompressed zip contents exceed {MAX_ZIP_UNCOMPRESSED_BYTES} byte limit"
             )
         # Per-entry compression ratio catches a single giant entry hiding
         # inside an otherwise-small archive. Skip tiny/directory entries.

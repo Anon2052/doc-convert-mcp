@@ -519,13 +519,9 @@ def issue_key_for_session(session_id: str) -> str:
     checkout for the configured price (M-2); the raw key is returned once
     and only its hash is stored.
     """
-    session = _stripe().checkout.Session.retrieve(
-        session_id, expand=["line_items"]
-    )
+    session = _stripe().checkout.Session.retrieve(session_id, expand=["line_items"])
     if not _session_is_paid_subscription(session):
-        raise LookupError(
-            "checkout session is not a paid subscription for the configured price"
-        )
+        raise LookupError("checkout session is not a paid subscription for the configured price")
     customer_id = _ev(session, "customer")
     if not customer_id:
         raise LookupError("checkout session has no customer")
