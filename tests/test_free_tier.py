@@ -20,6 +20,7 @@ all three connectors — Scott's call, 2026-10-21).
 from __future__ import annotations
 
 import base64
+import datetime
 import hashlib
 import sqlite3
 
@@ -33,6 +34,18 @@ from tests.test_payments import _enable_x402, _FakeFacilitator, _payment_header
 
 IP_A = "10.0.0.1"
 IP_B = "10.0.0.2"
+
+
+def _next_month() -> str:
+    """Calendar month after the current UTC month.
+
+    The month-reset test must target a month different from 'now' — the
+    hardcoded '2026-11' went stale the moment November arrived and the
+    patch became a no-op.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    year, month = (now.year + 1, 1) if now.month == 12 else (now.year, now.month + 1)
+    return f"{year:04d}-{month:02d}"
 
 
 @pytest.fixture(autouse=True)
@@ -136,10 +149,10 @@ def test_month_reset_refills_bucket(free_client, monkeypatch):
     _pdf_post(free_client)
     _pdf_post(free_client)
     assert _pdf_post(free_client).status_code == 402
-    monkeypatch.setattr(billing, "current_month_utc", lambda: "2026-11")
+    monkeypatch.setattr(billing, "current_month_utc", lambda: _next_month())
     assert _pdf_post(free_client).status_code == 200
     usage = billing.get_free_tier_usage(IP_A)
-    assert usage["period"] == "2026-11"
+    assert usage["period"] == _next_month()
     assert usage["credits_used"] == 0.8
 
 
