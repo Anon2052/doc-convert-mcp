@@ -7,10 +7,10 @@ services:
     plan: starter
     autoDeploy: true
     # Persistent disk for the subscriber SQLite DB (billed $0.25/GB/mo;
-    # 1 GB = $0.25/mo). Only files under mountPath survive redeploys.
-    # BILLING_DB_PATH is set explicitly below: Render does not remove env vars
-    # deleted from render.yaml, so omitting it would leave the live service pinned
-    # to the old ./data path even after the disk attaches.
+    # 1 GB = $0.25/mo). Only files under mountPath survive redeploys —
+    # BILLING_DB_PATH's code default (/var/lib/doc-convert-mcp/billing.db)
+    # points here; the env var is intentionally NOT set in render.yaml so the
+    # disk stanza stays the single source of truth for the mount path.
     disk:
       name: doc-convert-data
       mountPath: /var/lib/doc-convert-mcp
@@ -18,20 +18,5 @@ services:
     envVars:
       - key: X402_ENABLED
         value: "false"
-      - key: BILLING_DB_PATH
-        value: "/var/lib/doc-convert-mcp/billing.db"
       - key: RATE_LIMIT
         value: 60/minute
-      # Anonymous free tier: monthly credit bucket per client IP (default 50
-      # credits = $0.50 of list-price calls). Kill switch — set to "false" to
-      # skip the free path entirely (falls straight to the x402 402 challenge).
-      - key: FREE_TIER_ENABLED
-        value: "true"
-      - key: FREE_MONTHLY_CREDITS
-        value: "50"
-      # Shared secret for GET /billing/stats (X-Admin-Key header or
-      # ?admin_key= param). sync: false = Render never overwrites the value;
-      # set a long random string in the dashboard — required, the endpoint
-      # 401s until you do.
-      - key: ADMIN_KEY
-        sync: false

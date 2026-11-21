@@ -2,3 +2,5 @@
 pytest==9.1.1
 ruff==0.16.8
 pip-audit==2.10.1
+filelock==4.2.1  # via cachecontrol (pip-audit); pinned to pip-audit fix version
+msgpack==1.2.3  # via cachecontrol (pip-audit); pinned to CVE-2026-114613 fix version

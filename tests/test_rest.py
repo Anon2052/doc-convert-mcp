@@ -12,6 +12,13 @@ from doc_convert_mcp.rest_app import create_app
 from tests.test_converters import make_pdf_bytes  # noqa: F401  (shared fixture builder)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_billing_db(monkeypatch, tmp_path):
+    """M-1: the replay table is persistent — point every test at a scratch
+    DB so claims can never leak between tests (or touch the real path)."""
+    monkeypatch.setenv("BILLING_DB_PATH", str(tmp_path / "billing.db"))
+
+
 @pytest.fixture()
 def client():
     return TestClient(create_app())

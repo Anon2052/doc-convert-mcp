@@ -1,14 +1,19 @@
 # Runtime dependencies — exact pins. Regenerate requirements.txt with:
 #   pip-compile --generate-hashes requirements.in -o requirements.txt
-fastmcp==4.0.5
+fastmcp==4.1.2
 fastapi==0.141.1
 uvicorn==0.53.0
 slowapi==0.1.10
-pypdf==6.19.0
-Pillow==12.3.0
+pypdf==6.21.4
+Pillow==13.0.0
 pytesseract==0.3.13
 openpyxl==3.1.5
 httpx==0.28.1
 python-multipart==0.0.32
 stripe==15.6.1
 cryptography==50.0.1
+pyjwt==2.15.0  # via mcp; pinned to the patched release (H-7)
+defusedxml==0.7.1  # L-7: safe XML parsing (openpyxl uses it when present)
+opentelemetry-api==1.45.1  # via fastmcp-slim/mcp; pinned to pip-audit fix version
+authlib==1.9.1  # via fastmcp-slim; pinned to pip-audit fix version
+dnspython==2.9.0  # via email-validator; pinned to pip-audit fix version
