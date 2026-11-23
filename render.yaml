@@ -3,7 +3,7 @@ services:
     name: doc-convert-mcp
     runtime: image
     image:
-      url: docker.io/ioconnex/doc-convert-mcp:20261121a
+      url: docker.io/ioconnex/doc-convert-mcp:20261121b
     healthCheckPath: /health
     plan: starter
     autoDeploy: true
