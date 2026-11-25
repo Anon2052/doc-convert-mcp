@@ -5,8 +5,8 @@ Built for AI agents — and Muse in particular — that need to turn messy files
 into clean text: PDFs to Markdown, images to text (OCR), spreadsheets to
 Markdown tables, and web pages to clean text.
 
-Monetization hook: per-request metering via **x402 USDC micropayments on Base**
-(env-gated, off by default).
+Monetization: per-request metering via **x402 USDC micropayments on Base**
+(live on the hosted service since Oct 20, 2026; env-gated, off by default for self-hosted runs).
 
 ## Tools
 
@@ -16,6 +16,7 @@ Monetization hook: per-request metering via **x402 USDC micropayments on Base**
 | `ocr_image` | Image bytes (base64), `lang` | Recognized text (Tesseract) |
 | `parse_spreadsheet` | CSV/XLSX bytes (base64), `filename` | Markdown tables, one section per sheet |
 | `url_to_clean_text` | Public `http(s)` URL | Main text content, markup stripped |
+| `convert_document` | Document bytes (base64), any common format (PDF, DOCX, PPTX, spreadsheets, images, RTF, EPUB, TXT, HTML, JSON, XML) | Markdown |
 
 Limits: 25 MB per input file, 100 PDF pages, 5000 spreadsheet rows.
 `url_to_clean_text` rejects private/loopback/link-local IPs (SSRF guard).
@@ -97,7 +98,7 @@ Rate limiting: 60 requests/minute per IP on conversion endpoints
 
 ## x402 metering (USDC on Base) — real verification
 
-Disabled by default. When enabled, paid paths (`/convert/*`, `POST /mcp`
+Live on the hosted service since Oct 20, 2026 (off by default for self-hosted runs — env-gated). Paid paths (`/convert/*`, `POST /mcp`
 tool calls) require an `X-Payment` header carrying a base64-encoded x402 v1
 payment payload with a signed EIP-3009 USDC authorization on Base. The server
 verifies with an x402 facilitator (`/verify`), serves the request, then
@@ -123,11 +124,12 @@ x402.org testnet facilitator).
 
 | Tool | Default price | Env override |
 |---|---|---|
-| `pdf_to_markdown` | $0.03 | `X402_PRICE_PDF_TO_MARKDOWN_USDC` |
-| `ocr_image` | $0.02 | `X402_PRICE_OCR_IMAGE_USDC` |
-| `parse_spreadsheet` | $0.02 | `X402_PRICE_PARSE_SPREADSHEET_USDC` |
-| `url_to_clean_text` | $0.01 | `X402_PRICE_URL_TO_CLEAN_TEXT_USDC` |
-| anything else | $0.015 | `X402_PRICE_USDC` |
+| `pdf_to_markdown` | $0.008 | `X402_PRICE_PDF_TO_MARKDOWN_USDC` |
+| `ocr_image` | $0.008 | `X402_PRICE_OCR_IMAGE_USDC` |
+| `parse_spreadsheet` | $0.008 | `X402_PRICE_PARSE_SPREADSHEET_USDC` |
+| `url_to_clean_text` | $0.008 | `X402_PRICE_URL_TO_CLEAN_TEXT_USDC` |
+| `convert_document` | $0.008 | `X402_PRICE_CONVERT_DOCUMENT_USDC` |
+| anything else | $0.008 | `X402_PRICE_USDC` |
 
 > **Pricing is a business decision — adjust before enabling.** Invalid or
 > non-positive price values fall back to the default (never zero).
@@ -197,3 +199,4 @@ CI (GitHub Actions) runs secrets scan → ruff → pytest → pip-audit on every
   push protection, Dependabot alerts/updates.
 - URL fetcher has an SSRF guard (no private/loopback/metadata IPs).
 - Never commit secrets — push protection is the backstop, not the plan.
+
